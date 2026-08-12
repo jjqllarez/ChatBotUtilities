@@ -1,0 +1,18 @@
+[Unit]
+Description=WhatsApp Bot (Capital Motors)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/whatsbot
+EnvironmentFile=/opt/whatsbot/.env
+ExecStart=/opt/whatsbot/bot
+Restart=always
+RestartSec=5
+# Usuario/grupo con el que corre el servicio (opcional)
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

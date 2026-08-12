@@ -1,0 +1,14 @@
+# Secretos
+.env
+
+# Binarios
+bot
+bot.exe
+*.exe
+
+# Tests/backups temporales
+*.test
+*~
+
+# Estado local del CLI de supabase
+supabase/.temp/
