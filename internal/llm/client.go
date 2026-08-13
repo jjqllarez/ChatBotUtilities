@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,56 +59,163 @@ type respType struct {
 
 // Client habla con la API de chat de OpenRouter.
 type Client struct {
-	apiKey  string
-	model   any // string o []string (router/lista)
-	http    *http.Client
-	baseURL string
+	apiKey   string
+	models   []string // lista ordenada de modelos con failover
+	http     *http.Client
+	chatHTTP *http.Client // timeout corto para detectar modelos colgados
+	baseURL  string
+
+	mu       sync.Mutex
+	cooldown map[string]time.Time // modelo -> hasta cuándo se salta por fallar
+
+	logger *log.Logger
 }
 
-// NewClient recibe el model: una string (p.ej. "openrouter/auto") o un JSON
-// array de modelos.
+// NewClient recibe el model: una string (p.ej. "openrouter/auto"), una lista
+// separada por comas o un JSON array de modelos. La lista se prueba en orden:
+// si uno falla (timeout, error HTTP, respuesta vacía), se pasa al siguiente.
 func NewClient(apiKey, model string) *Client {
 	c := &Client{
-		apiKey:  apiKey,
-		http:    &http.Client{Timeout: 120 * time.Second},
-		baseURL: "https://openrouter.ai/api/v1/chat/completions",
+		apiKey:   apiKey,
+		http:     &http.Client{Timeout: 120 * time.Second},
+		chatHTTP: &http.Client{Timeout: 20 * time.Second},
+		baseURL:  "https://openrouter.ai/api/v1/chat/completions",
+		cooldown: map[string]time.Time{},
+		logger:   log.New(io.Discard, "", 0),
 	}
-	if len(model) > 0 && model[0] == '[' {
-		var list []string
-		if err := json.Unmarshal([]byte(model), &list); err == nil && len(list) > 0 {
-			c.model = list
-		}
-	}
-	if c.model == nil {
-		c.model = model
-	}
+	c.models = parseModelList(model)
 	return c
 }
 
-// Chat envía mensajes (con tools opcionales) y devuelve la elección del modelo.
+// SetLogger activa el registro de fallos/failover del cliente.
+func (c *Client) SetLogger(l *log.Logger) {
+	if l != nil {
+		c.logger = l
+	}
+}
+
+// parseModelList interpreta el valor de OPENROUTER_MODEL: puede ser un JSON
+// array, una lista separada por comas o un solo modelo.
+func parseModelList(model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return []string{"openrouter/auto"}
+	}
+	var out []string
+	if strings.HasPrefix(model, "[") {
+		var list []string
+		if err := json.Unmarshal([]byte(model), &list); err == nil && len(list) > 0 {
+			return appendAuto(list)
+		}
+	}
+	for _, m := range strings.Split(model, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"openrouter/auto"}
+	}
+	return appendAuto(out)
+}
+
+// appendAuto agrega openrouter/auto al final como red de seguridad si no está
+// explícito en la lista.
+func appendAuto(list []string) []string {
+	found := false
+	for _, m := range list {
+		if m == "openrouter/auto" {
+			found = true
+		}
+	}
+	if !found {
+		list = append(list, "openrouter/auto")
+	}
+	return list
+}
+
+// Models devuelve la lista de modelos configurada (para logs/diagnóstico).
+func (c *Client) Models() []string {
+	return c.models
+}
+
+// Chat envía mensajes (con tools opcionales) probando los modelos en orden
+// hasta obtener una respuesta no vacía. Si un modelo falla entra en "enfriamiento"
+// y se salta durante un rato para no re-intentarlo en cada mensaje.
 func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (Message, error) {
-	body := map[string]any{
-		"model":    c.model,
-		"messages": messages,
-	}
-	if len(tools) > 0 {
-		body["tools"] = tools
-	}
-	b, err := json.Marshal(body)
-	if err != nil {
-		return Message{}, err
+	body := func(model any) ([]byte, error) {
+		b := map[string]any{"model": model, "messages": messages}
+		if len(tools) > 0 {
+			b["tools"] = tools
+		}
+		return json.Marshal(b)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(b))
-	if err != nil {
-		return Message{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	for _, m := range c.nextCandidates() {
+		// Si el contexto global ya expiró, no tiene sentido seguir.
+		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < 2*time.Second {
+			break
+		}
+		b, err := body(m)
+		if err != nil {
+			return Message{}, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(b))
+		if err != nil {
+			return Message{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+		msg, err := c.doOnce(req, m)
+		if err != nil {
+			c.markFailed(m)
+			c.logger.Printf("LLM modelo %s falló: %v", m, err)
+			continue
+		}
+		// Respuesta vacía sin tool calls = fallo del modelo, probar el siguiente.
+		if msg.Content == "" && len(msg.ToolCalls) == 0 {
+			c.markFailed(m)
+			c.logger.Printf("LLM modelo %s devolvió respuesta vacía", m)
+			continue
+		}
+		return msg, nil
+	}
+	return Message{}, fmt.Errorf("todos los modelos fallaron")
+}
+
+// nextCandidates devuelve los modelos a probar, saltando los que están en
+// enfriamiento. Si todos están en enfriamiento, los reactiva todos.
+func (c *Client) nextCandidates() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	var out []string
+	for _, m := range c.models {
+		if until, ok := c.cooldown[m]; ok && now.Before(until) {
+			continue
+		}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		c.cooldown = map[string]time.Time{}
+		return append([]string(nil), c.models...)
+	}
+	return out
+}
+
+// markFailed pone un modelo en enfriamiento tras un fallo.
+func (c *Client) markFailed(model string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cooldown[model] = time.Now().Add(60 * time.Second)
+}
+
+// doOnce ejecuta una petición de chat contra un modelo concreto.
+func (c *Client) doOnce(req *http.Request, model string) (Message, error) {
+	resp, err := c.chatHTTP.Do(req)
 	if err != nil {
-		return Message{}, err
+		return Message{}, fmt.Errorf("openrouter %s: %w", model, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)

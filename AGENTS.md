@@ -91,7 +91,149 @@ guardado se reutiliza, si no se genera un QR nuevo.
  8. **`fmt.Sprintf` con CSS**: si tu plantilla HTML lleva `%` (p. ej. `height:100%`), escápalos como `%%` para no romper el `%`-verb.
  9. **Chromium**: el render PDF/PNG/card usa el binario de `CHROME_PATH` o el `chromium_headless_shell` de ms-playwright; se levanta on-demand y se cierra. Sólo PDF/PNG; para la card se autocorta al borde (`trimPNG`).
 
+## Fallas corregidas con el probe local (2026-08-13)
+
+Fallas reales encontradas probando con el bot cliente local (`probe.go`, ver `probe-local.md`)
+y corregidas en caliente:
+
+1. **`stepCliente` se quedaba pegado si el cliente no existía** (`internal/bot/cotizacion_flow.go`):
+   si `BuscarClientes` devolvía 0 resultados y el texto no era formato `TipoDoc,Cedula,Nombre,Telefono`,
+   el bot respondía "No encontré ese cliente..." y quedaba esperando sin registrar nada.
+   **Fix**: `parseNuevoCliente` extrae nombre + teléfono/cédula de texto libre (regexp
+   `reClienteTelefono`, `reClienteDoc`), llama `CrearCliente` y continúa a `askConfirmar`; si no
+   hay datos suficientes, recién ahí pide el formato `TipoDoc,Cedula,Nombre,Telefono`.
+
+2. **`/cancelar` mudo tras reinicio del bot** (`internal/bot/cotizacion_flow.go`):
+   `cancel()` solo revisaba la sesión **en memoria** (`f.sessions[phone]`). Tras un reinicio con un
+   flujo persistido en `bot_chat_state`, el `/cancelar` no recargaba el borrador, no respondía nada y
+   `handleCommand` devolvía `true`, tragándose el mensaje (el usuario no sabía si se canceló).
+   **Fix**: `cancel()` ahora usa `ensureSession` (recarga el borrador persistido), limpia el draft y
+   **siempre** responde "Cotización cancelada.".
+
+3. **Identificación del remitente (LID vs número de teléfono)** (`internal/bot/bot.go`):
+   WhatsApp migra los chats a LIDs (`@lid`). El handler resuelve el teléfono real con
+   `ev.Info.SenderAlt.ToNonAD().User` (si está presente), si no con `ev.Info.Sender.ToNonAD().User`.
+   Verificado con el probe: `sender=...@lid` + `senderAlt=584248821071@s.whatsapp.net` →
+   `phone=584248821071` → coincide con `empleados.telefono` (+584248821071) por dígitos.
+   **No usar `UserID` del empleado como número**: `UserID` es un UUID que solo sirve como
+   `p_user_id` en los RPC de emisión, nunca para construir JIDs o buscar por teléfono.
+   Se dejaron líneas `DEBUG msg ... phone= ... sender= ... senderAlt= ...` en `handleMessage`
+   para diagnóstico (también loguea si el remitente no es empleado activo).
+
+4. **Anti-baneo reforzado** (para no arriesgar ninguna de las 2 cuentas: la de producción y la del probe):
+   - Ya existía: separación mínima entre envíos (`WA_MIN_GAP_MS`, default 1200 ms) y cuota diaria por
+     chat (`WA_MAX_DAILY_MSGS`, default 1500) en `internal/bot/guards.go`.
+   - Nuevo: pausa de 3 s antes de reconectar tras un disconnect (`Run` en `internal/bot/bot.go`) para
+     no parecer una reconexión automatizada.
+   - Nuevo: throttle de 3 s entre `/send` del probe (`probe.go`) para evitar ráfagas accidentales.
+   - Recomendación operativa: NO hacer pruebas en ráfagas ni repetir el mismo mensaje muchas veces
+     seguidas; cada prueba es 1 mensaje manual espaciado.
+
+5. **Supabase 500 intermitente en sync de app state** (observado, no corregido): a veces
+   `Failed to sync app state ... whatsmeow_app_state_mutation_macs -> 500`. No rompe el bot
+   (reintenta), pero si reaparece, revisar si PostgREST sobrecarga la BD. Recargar esquema:
+   `supabase db query --linked "SELECT pg_notify('pgrst','reload schema');"`.
+
+6. **Interrupciones de catálogo en el flujo** (`internal/bot/cotizacion_flow.go`):
+   en `stepVehiculo`/`stepPrecio`/`stepPlan`/`stepInicial`/`stepPickCliente`/`stepConfirmar`,
+   si `parseIndex` falla y el texto es un pedido de catálogo (`esPeticionCatalogo`: "lista de
+   vehiculos", "precios de los carros", "dame la lista de vehiculos con precios", "que vehiculos
+   hay", etc.), el bot llama `toolListar`/`listar_catalogo` directamente en vez de mandar el texto
+   al LLM (que inventaba opciones falsas tipo "Elige 1 (Estandar)").
+
+7. **Ficha/card del vehículo determinista** (`internal/bot/intent.go`):
+   `parseFichaVehiculo` + regexp `reFichaVehiculo` ("ficha/card del vehículo N") se manejan en
+   `handleDirectIntent` llamando `toolEnviarFicha` con `{"version_id":N}` directamente. Antes el
+   LLM regurgitaba "¿Tipo de precio para PALADIN MID?" en vez de enviar la imagen de la card.
+
+8. **Cédula con letra obligatoria** (`internal/bot/cotizacion_flow.go`):
+   `parseDoc` acepta `V16573081`, `V-16573081` y `V 16573081` pero **rechaza un número sin letra**
+   (no se puede saber el tipo de documento). En `stepCliente` si el texto trae nombre+teléfono sin
+   cédula, se pasa a `stepClienteCedula` pidiendo "Escribe la cédula de X (ej: V-12345678)."; si el
+   texto no tiene letra, pide "Escribe la cédula con su letra (ej: V-16573081). La letra puede ser
+   V, E, J, P o G.". `parseNuevoCliente` ya no usa el teléfono como número de documento.
+
+9. **Duplicado de cliente al crear (409 23505)** (`internal/cotizaciones/catalogo.go`):
+   el RPC `insertar_cliente_empleado` falla con 409 `unq_cliente_por_socio` si ya existe un cliente
+   con el mismo (socio, tipo_documento, número). `CrearCliente` ahora detecta el error (409/23505)
+   y llama `BuscarClientePorDocumento` (select REST por esos 3 campos) para **reutilizar el id del
+   cliente existente** en vez de mostrar "No pude registrar el cliente: ...". Verificado: la cédula
+   V-16573081 (cliente id 21) con nombre distinto reutilizó el id 21 y emitió COT-260813-006.
+
+10. **`parseIndex` solo aceptaba dígitos puros** (`internal/bot/cotizacion_flow.go`):
+    un texto como `"La 20"` fallaba y caía al LLM, que respondía la pregunta del paso **sin
+    avanzar el estado** del flujo; el siguiente `"3"` se reinterpretaba como índice de vehículo
+    (#3 = PALADIN UPR) en vez de "Flota", **repitiendo el prompt "¿Tipo de precio..." con el
+    vehículo equivocado** (visto en el chat manual de las 11:10; terminó en COT-260813-007 con
+    PALADIN UPR en vez de la Navara pedida).
+    **Fix**: `parseIndex` ahora extrae el **primer número** del texto (regexp `\d+`), aceptando
+    `"20"`, `"La 20"`, `"el vehículo 3"`, `"opción 2"`, etc. Además `stepPrecio` y `stepFormaPago`
+    tienen fallback numérico (`"el 3"` → flota, `"la 2"` → crédito) para no delegar al LLM algo
+    que pertenece al flujo. Verificado en vivo: `"La 20"` → Navara 4WD STD, `"3"` → Flota →
+    plan → COT-260813-008.
+
+11. **Inicial acepta porcentaje o moneda** (`internal/bot/cotizacion_flow.go`, `parseInicial`):
+    en `stepInicial` el usuario puede responder con **porcentaje** ("50", "50%", "50 por ciento",
+    "el 50") y el bot **calcula él mismo el monto** (`precio × %/100`, se convierte a USD y sigue
+    el flujo en moneda), o con **monto en USD** ("25000", "$25000", "25000 USD") que se usa
+    directo. Regla: número sin marcador `<= 100` se interpreta como porcentaje; `> 100` como USD.
+    El prompt ahora muestra "(ej: 25000 o 50%)" y el rechazo del mínimo muestra porcentaje + USD.
+    Verificado en vivo: `50%` → 19.026,78 USD (50% de la flota 38.053,56 del PALADIN MID) y
+    `25000` → 25.000,00 USD.
+
+12. **Fallo silencioso de ficha/imprimir** (`internal/bot/intent.go`): `handleDirectIntent` enrutaba
+    `toolEnviarFicha`/`toolImprimirCotizacion` pero **tragaba** el error: el resultado ("No encontré la
+    versión 5.") se devolvía solo al LLM (que no lo reenviaba) y el usuario no veía nada.
+    **Fix**: helper `directResultError(r)` (true si el texto no contiene "enviad") → si es un error,
+    `handleDirectIntent` lo envía con `sendText`. Verificado en vivo: "ficha del vehiculo 5" →
+    "No encontré la versión 5." (11:46:58).
+
+13. **Números negativos y ≤0** (`internal/bot/cotizacion_flow.go`, `firstPositiveNumber`): `parseIndex`
+    y `parseInicial` extraen ahora el primer número rechazando un `-` precedente y `<= 0`
+    (tests `TestFirstPositiveNumber`/`TestParseInicialFixes`). Antes "-1" se interpretaba como 1.
+
+14. **El LLM recordaba mal el paso del flujo en curso** (`stepHint` en `cotizacion_flow.go`): cuando el
+    empleado interrumpía `/cotizar` con otra petición, el asistente respondía al margen del borrador.
+    **Fix**: `stepHint(ctx, phone)` devuelve un mensaje de sistema con el paso ACTIVO y cómo
+    continuarlo (p. ej. "recuérdale que escriba el número del vehículo"); `bot.go` lo pasa a
+    `runAssistant(..., flowHint)` en las dos llamadas y `assistant.go` lo inyecta como mensaje `system`.
+
+15. **Failover de modelos LLM** (`internal/llm/client.go`): el modelo único fallaba en silencio
+    (respuesta vacía: "hola que haces?" y "asdfghjkl" quedaron sin `assistant` en el historial).
+    **Fix**: `OPENROUTER_MODEL` acepta JSON array / coma-separado / único; `Chat` itera los modelos en
+    orden y salta los que fallan (error HTTP, timeout 20 s/modelo vía `chatHTTP`, respuesta vacía sin
+    tool calls) con **cooldown 60 s** (`cooldown` map + mutex); `openrouter/auto` se agrega al final
+    como red de seguridad. `runAssistant` usa `llmCtx` con `context.WithTimeout(150s)` para dar margen
+    al failover; `main.go` loguea la lista con `SetLogger`/`Models()`. Verificado en vivo: con
+    `fake-model-xyz:free` primero, el bot logueó el fallo (400) y respondió con el siguiente modelo.
+
+16. **`isAdmin` nunca detectaba administradores** (`internal/bot/assistant.go`): el RPC
+    `obtener_permisos_usuario` devuelve la columna **`codigo_permiso`**, pero `queryAdmin` solo
+    revisaba `codigo|permiso|nombre|clave` → `isAdmin` devolvía siempre `false` y el precio
+    personalizado (feature de admins) **nunca se aplicaba**. **Fix**: añadir `codigo_permiso` a las
+    claves chequeadas. Verificado con un harness temporal contra la BD real (se borró):
+    `isAdmin(JOHNATHAN)=true`, `isAdmin(Roymer, cargo VENDEDOR)=false`.
+    Prueba end-to-end del guard (harness → `toolCrearCotizacion` con
+    `precio_personalizado=30000`, Navara 2WD FLG flota):
+    - ADMIN (JOHNATHAN): COT-260813-009 → `precio_seleccionado: 30000` (personalizado honrado).
+    - VENDEDOR (Roymer): COT-260813-010 → `precio_seleccionado: 36213.14` (lista flota; el 30000 se ignoró).
+
+17. **`BuscarClientes` no matcheaba cédula con letra** (`internal/cotizaciones/catalogo.go`): el RPC
+    `buscar_clientes` busca contra `numero_documento` **sin la letra**: "V-16573081" devolvía 0
+    resultados (y el flujo pedía registrar un cliente que ya existía). **Fix**: si el término es un
+    documento con letra (`V/E/J/P/G` + dígitos, regexp `reDocLetra`) y la búsqueda devuelve vacío,
+    se reintenta con solo los dígitos. Verificado: "V-16573081" → cliente 21.
+
+18. **Regresión en vivo del flujo `/cotizar` completo (post-fixes 16/17, binario desplegado)**: el flujo
+    guiado de punta a punta — `/cotizar` → forma de pago 2 (Crédito) → vehículo 17 (Navara 2WD FLG) →
+    precio 3 (Flota 36.213,14 USD) → plan 1 (ARCA 12 MESES) → inicial `50%` (18.106,57 USD) → cliente
+    **`V-16573081`** (encontrado gracias al fix 17) → confirmación → emisión COT-260813-011 (id 27) con
+    **PDF + imagen** enviados y leídos. El detalle guardado en Supabase confirma `precio_seleccionado:
+    36213.14` (flota), `inicial: 18106.57` (50%), plan ARCA 12 MESES, vendedor JOHNATHAN QUIJADA.
+
+
 ## Emisión de cotizaciones (flujo `/cotizar`)
+
 
 - Es una **máquina de estados por chat** (`internal/bot/cotizacion_flow.go`), map `sessions[phone]` con mutex en el `Bot`.
 - Pasos: forma de pago → vehículo → tipo de precio → (crédito) plan + inicial → cliente (buscar o crear) → confirmar.
@@ -183,7 +325,8 @@ supabase db query --linked "SELECT pg_notify('pgrst','reload schema');"  # recar
 
 ## Variables de entorno del asistente LLM
 
-- `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (default `openrouter/auto`)
+- `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (default `openrouter/auto`; puede ser un solo modelo, una lista
+  separada por comas o un JSON array — se prueban en orden con failover y cooldown, ver fix 15)
 - `TRANSCRIBE_MODEL` (default `google/gemini-2.5-flash-lite`) — transcripción de notas de voz (Gemini vía OpenRouter)
 - `WA_MIN_GAP_MS` (default 1200), `WA_MAX_DAILY_MSGS` (default 1500) — anti-baneo
 - `HISTORY_CLEAN_HOUR` (default 3), `HISTORY_RETAIN_HOURS` (default 24) — limpieza de memoria

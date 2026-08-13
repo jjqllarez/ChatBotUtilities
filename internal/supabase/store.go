@@ -147,13 +147,13 @@ func (s *Store) MigratePNToLID(ctx context.Context, pn, lid types.JID) error {
 // --- PreKeyStore ---
 
 func (s *Store) nextPreKeyID(ctx context.Context) (uint32, error) {
-	rows, err := s.client.Select(ctx, "whatsmeow_pre_keys", "?select=max(key_id)&"+kv("jid", s.JID))
+	rows, err := s.client.Select(ctx, "whatsmeow_pre_keys", "?select=key_id&"+kv("jid", s.JID)+"&order=key_id.desc&limit=1")
 	if err != nil {
 		return 0, err
 	}
 	var maxID int64 = 0
 	if len(rows) > 0 {
-		maxID = GetInt(rows[0], "max")
+		maxID = GetInt(rows[0], "key_id")
 	}
 	return uint32(maxID) + 1, nil
 }

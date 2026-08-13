@@ -2,6 +2,7 @@ package empleados
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"unicode"
 
@@ -27,6 +28,37 @@ func NormalizePhone(p string) string {
 		}
 	}
 	return b.String()
+}
+
+// CargoActual devuelve el nombre del último cargo registrado del empleado
+// (última fila de historial_cargos por id). Devuelve "" si no tiene cargo.
+func CargoActual(ctx context.Context, client *supabase.Client, empleadoID int64) (string, error) {
+	rows, err := client.Select(ctx, "historial_cargos",
+		fmt.Sprintf("?select=id,cargo_id,cargos(nombre)&empleado_id=eq.%d&order=id.desc&limit=1", empleadoID))
+	if err != nil {
+		return "", err
+	}
+	if len(rows) == 0 {
+		return "", nil
+	}
+	return nestedString(rows[0]["cargos"], "nombre"), nil
+}
+
+func nestedString(v any, key string) string {
+	if m, ok := v.(map[string]any); ok {
+		if s, ok := m[key].(string); ok {
+			return s
+		}
+	}
+	arr, ok := v.([]any)
+	if ok && len(arr) > 0 {
+		if m, ok := arr[0].(map[string]any); ok {
+			if s, ok := m[key].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // LookupByPhone finds an active employee whose telefono matches the given phone.

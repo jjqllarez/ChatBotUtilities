@@ -16,6 +16,11 @@ type Config struct {
 
 	OpenRouterKey   string
 	OpenRouterModel string
+
+	WhatsmeowDB string
+
+	BotRole     string
+	ProbeTarget string
 }
 
 func Load() (*Config, error) {
@@ -29,6 +34,9 @@ func Load() (*Config, error) {
 		QRPort:             os.Getenv("QR_PORT"),
 		OpenRouterKey:      os.Getenv("OPENROUTER_API_KEY"),
 		OpenRouterModel:    os.Getenv("OPENROUTER_MODEL"),
+		WhatsmeowDB:        os.Getenv("WHATSMEOW_DB"),
+		BotRole:            os.Getenv("BOT_ROLE"),
+		ProbeTarget:        os.Getenv("PROBE_TARGET"),
 	}
 	if cfg.QRPort == "" {
 		cfg.QRPort = "8080"
@@ -37,11 +45,13 @@ func Load() (*Config, error) {
 		cfg.OpenRouterModel = "openrouter/auto"
 	}
 
-	if cfg.SupabaseURL == "" {
-		return nil, fmt.Errorf("SUPABASE_URL no está definido en .env")
-	}
-	if cfg.SupabaseServiceKey == "" {
-		return nil, fmt.Errorf("SUPABASE_SERVICE_ROLE_KEY no está definido en .env")
+	if cfg.BotRole != "probe" {
+		if cfg.SupabaseURL == "" {
+			return nil, fmt.Errorf("SUPABASE_URL no está definido en .env")
+		}
+		if cfg.SupabaseServiceKey == "" {
+			return nil, fmt.Errorf("SUPABASE_SERVICE_ROLE_KEY no está definido en .env")
+		}
 	}
 	return cfg, nil
 }

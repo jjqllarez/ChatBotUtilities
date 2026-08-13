@@ -3,9 +3,15 @@ package cotizaciones
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/url"
+	"regexp"
+	"strings"
 
 	"bot/internal/supabase"
 )
+
+var reDocLetra = regexp.MustCompile(`(?i)^\s*[VEJPG]\s*-?\s*(\d{4,})\s*$`)
 
 // Version es una versión de vehículo con su precio vigente (3 tipos).
 type Version struct {
@@ -61,21 +67,71 @@ func ObtenerVersiones(ctx context.Context, client *supabase.Client, socioID int6
 	return out, err
 }
 
-// BuscarClientes busca clientes por término (cédula/nombre).
+// BuscarClientes busca clientes por término (cédula/nombre). Si el término
+// trae la letra del documento ("V-16573081") y la búsqueda no encuentra nada,
+// reintenta con solo los dígitos ("16573081"), porque el RPC busca contra
+// numero_documento sin la letra.
 func BuscarClientes(ctx context.Context, client *supabase.Client, socioID int64, term string) ([]Cliente, error) {
+	term = strings.TrimSpace(term)
 	var out []Cliente
 	err := client.RPC(ctx, "buscar_clientes", map[string]any{
 		"p_search_term":        term,
 		"p_socio_comercial_id": socioID,
 	}, &out)
-	return out, err
+	if err != nil {
+		return out, err
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+	// Término con letra de documento + número → reintentar sin la letra.
+	if digits := docDigits(term); digits != "" && digits != term {
+		var out2 []Cliente
+		if err2 := client.RPC(ctx, "buscar_clientes", map[string]any{
+			"p_search_term":        digits,
+			"p_socio_comercial_id": socioID,
+		}, &out2); err2 == nil && len(out2) > 0 {
+			return out2, nil
+		}
+	}
+	return out, nil
+}
+
+// docDigits extrae los dígitos de un documento con letra ("V-16573081",
+// "E 12345678"); devuelve "" si el texto no es un documento con letra.
+func docDigits(term string) string {
+	m := reDocLetra.FindStringSubmatch(term)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// BuscarClientePorDocumento busca el cliente exacto por socio + tipo de
+// documento + número de cédula (para resolver duplicados al crear).
+func BuscarClientePorDocumento(ctx context.Context, client *supabase.Client, socioID int64, tipoDoc, cedula string) (*Cliente, error) {
+	if cedula == "" {
+		return nil, nil
+	}
+	rows, err := client.Select(ctx, "clientes",
+		fmt.Sprintf("?select=*&socio_comercial_id=eq.%d&tipo_documento=eq.%s&numero_documento=eq.%s&limit=1",
+			socioID, url.QueryEscape(tipoDoc), url.QueryEscape(cedula)))
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	c, err := clienteFromMap(rows[0])
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // CrearCliente crea un cliente nuevo y devuelve su id.
 func CrearCliente(ctx context.Context, client *supabase.Client, socioID int64, p CrearClienteParams) (int64, error) {
-	var res []struct {
-		ID int64 `json:"id"`
-	}
+	var raw json.RawMessage
 	err := client.RPC(ctx, "insertar_cliente_empleado", map[string]any{
 		"p_socio_comercial_id":  socioID,
 		"p_tipo_documento":      p.TipoDocumento,
@@ -84,14 +140,47 @@ func CrearCliente(ctx context.Context, client *supabase.Client, socioID int64, p
 		"p_correo":              p.Correo,
 		"p_telefono_principal":  p.TelefonoPrincipal,
 		"p_direccion":           p.Direccion,
-	}, &res)
+	}, &raw)
 	if err != nil {
+		// El RPC puede fallar con 409 si el cliente ya existe (unique
+		// unq_cliente_por_socio): resolver el duplicado y devolver el id.
+		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "23505") {
+			if p.TipoDocumento != "" && p.NumeroDocumento != "" {
+				ex, xerr := BuscarClientePorDocumento(ctx, client, socioID, p.TipoDocumento, p.NumeroDocumento)
+				if xerr == nil && ex != nil {
+					return ex.ID, nil
+				}
+			}
+		}
 		return 0, err
 	}
-	if len(res) == 0 {
-		return 0, nil
+	// El RPC devuelve un objeto {"id": N, ...}; se acepta también un array por robustez.
+	var one struct {
+		ID int64 `json:"id"`
 	}
-	return res[0].ID, nil
+	if json.Unmarshal(raw, &one) == nil && one.ID != 0 {
+		return one.ID, nil
+	}
+	var many []struct {
+		ID int64 `json:"id"`
+	}
+	if json.Unmarshal(raw, &many) == nil && len(many) > 0 {
+		return many[0].ID, nil
+	}
+	return 0, nil
+}
+
+// clienteFromMap convierte una fila REST de clientes en un Cliente.
+func clienteFromMap(r map[string]any) (Cliente, error) {
+	data, err := json.Marshal(r)
+	if err != nil {
+		return Cliente{}, err
+	}
+	var c Cliente
+	if err := json.Unmarshal(data, &c); err != nil {
+		return Cliente{}, err
+	}
+	return c, nil
 }
 
 // CrearClienteParams son los datos para crear un cliente.
