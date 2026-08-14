@@ -994,7 +994,6 @@ func parseClienteLine(text string) (*cotizaciones.CrearClienteParams, bool) {
 var (
 	reClienteTelefono = regexp.MustCompile(`\+?\d{10,13}`)
 	reClienteDoc      = regexp.MustCompile(`(?i)\b[VEJPGvejpg]\s*-?\s*\d{4,10}`)
-	reNoLetras        = regexp.MustCompile(`[^\p{L}\s]+`)
 )
 
 // parseDoc extrae tipo de documento (V/E/J/P/G) y número de un texto que solo
@@ -1031,13 +1030,17 @@ func parseNuevoCliente(text string) (*cotizaciones.CrearClienteParams, bool) {
 		tipoDoc = strings.ToUpper(m[:1])
 		doc = strings.TrimLeft(strings.TrimSpace(m[1:]), "- ")
 	}
-	// Quitar el token de cédula antes de extraer el nombre (evita que la
-	// letra del tipo de documento "V..." quede registrada como nombre).
+	// Quitar el token de cédula y el teléfono antes de extraer el nombre
+	// (evita que la letra del tipo de documento "V..." o el número queden
+	// registrados como nombre, sin borrar dígitos internos del nombre).
 	cleanTerm := term
 	if m := reClienteDoc.FindString(term); m != "" {
 		cleanTerm = strings.Replace(term, m, " ", 1)
 	}
-	nombre := strings.TrimSpace(strings.Join(strings.Fields(reNoLetras.ReplaceAllString(cleanTerm, " ")), " "))
+	if phone != "" {
+		cleanTerm = strings.Replace(cleanTerm, phone, " ", 1)
+	}
+	nombre := strings.TrimSpace(strings.Join(strings.Fields(cleanTerm), " "))
 	if doc == "" && phone == "" {
 		return nil, false
 	}
