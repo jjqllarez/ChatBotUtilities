@@ -212,6 +212,16 @@ func (f *flowManager) handleCommand(phone string, emp *empleados.Empleado, text 
 	return false
 }
 
+const mensajeComoCotizar = "Para hacer una cotización:\n" +
+	"1. Escribe /cotizar para iniciar.\n" +
+	"2. Elige la forma de pago: 1 (Contado) o 2 (Crédito).\n" +
+	"3. Elige el vehículo escribiendo su número.\n" +
+	"4. Elige el tipo de precio: 1 (Estándar), 2 (Premium) o 3 (Flota).\n" +
+	"5. Si es crédito, elige el plan y el inicial (US$ o %).\n" +
+	"6. Indica la cédula (V-12345678) o el nombre del cliente.\n" +
+	"7. Confirma y te envío la cotización en PDF e imagen.\n\n" +
+	"Si ya sabes lo que quieres, escribe /cotizar y te guío paso a paso."
+
 const mensajeAyuda = "Comandos disponibles:\n" +
 	"• /cotizar - iniciar una cotización\n" +
 	"• /listar - ver tus últimas cotizaciones\n" +

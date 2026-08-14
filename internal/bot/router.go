@@ -25,6 +25,7 @@ const (
 	intentImprimirCotizacion
 	intentCatalogo
 	intentListarCotizaciones
+	intentAyudaCotizar
 )
 
 // rePickNumber acepta la respuesta de selección de una lista (número suelto o
@@ -60,8 +61,22 @@ var stopwordsTerm = map[string]bool{
 	"cuanto": true, "cuesta": true, "precio": true, "precios": true,
 }
 
+// reAyudaCotizar detecta preguntas sobre CÓMO se hace una cotización
+// ("cómo hago una cotización?", "explica los pasos..."). Se responden de
+// forma determinista para que el LLM no imite el wizard desde el historial.
+var reAyudaCotizar = regexp.MustCompile(`(?i)(como|cómo|que es|qué es|que es un|qué es un|cual es|cuál es|como funciona|cómo funciona|explica|expliqueme|explícame|pasos|procedimiento|guia|guía|dime como|dime cómo)`)
+
+// parseAyudaCotizar devuelve true si el mensaje pregunta cómo se cotiza.
+func parseAyudaCotizar(text string) bool {
+	low := norm(text)
+	if !strings.Contains(low, "cotiza") {
+		return false
+	}
+	return reAyudaCotizar.MatchString(low)
+}
+
 // classifyIntent decide la intención del mensaje sin LLM, en orden fijo:
-// Cotizar > Ficha > Imprimir > Catálogo > Listar > Conversación.
+// Cotizar > Ayuda > Ficha > Imprimir > Catálogo > Listar > Conversación.
 func classifyIntent(text string) intent {
 	low := norm(text)
 	if parseIniciarCotizacion(text) {
@@ -78,6 +93,9 @@ func classifyIntent(text string) intent {
 	}
 	if parseListarCotizaciones(text) {
 		return intentListarCotizaciones
+	}
+	if parseAyudaCotizar(text) {
+		return intentAyudaCotizar
 	}
 	return intentConversacion
 }
@@ -162,6 +180,9 @@ func (b *Bot) handleRouterIntent(ctx context.Context, chat types.JID, phone stri
 		return true
 	case intentListarCotizaciones:
 		b.flows.list(phone, emp)
+		return true
+	case intentAyudaCotizar:
+		b.sendText(chat, mensajeComoCotizar)
 		return true
 	}
 	return false
