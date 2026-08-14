@@ -44,7 +44,8 @@ type Bot struct {
 	client *whatsmeow.Client // re-created en re-vinculación
 
 	guard   *Guard
-	flows   *flowManager
+	flows        *flowManager
+	flowRegistry *FlowRegistry
 	history *HistoryStore
 	state   *StateStore
 
@@ -115,6 +116,7 @@ func New(container DeviceContainer, supa *supabase.Client, qrPort string, llmCli
 	b.history = NewHistoryStore(supa)
 	b.state = NewStateStore(supa)
 	b.flows = newFlowManager(supa, b)
+	b.flowRegistry = newFlowRegistry(supa)
 
 	b.initClient(device)
 	go b.outWorker()
@@ -532,4 +534,10 @@ func firstWord(s string) string {
 		return s[:i]
 	}
 	return s
+}
+// RegisterFlow registra un flujo en el FlowRegistry del bot.
+// Se llama desde main.go al arrancar, antes de b.Run().
+// Ver AGENTS.md seccion 9 para el protocolo completo de registro.
+func (b *Bot) RegisterFlow(f Flow) {
+	b.flowRegistry.Register(f)
 }
