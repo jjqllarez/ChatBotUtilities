@@ -36,6 +36,10 @@ const (
 	stepClienteCedula = "cliente_cedula"
 )
 
+// draftTTL es el tiempo de inactividad tras el cual un borrador de /cotizar
+// se descarta (evita que un flujo abandonado capture mensajes posteriores).
+const draftTTL = 60 * time.Minute
+
 // quoteDraft guarda el avance del flujo /cotizar de un chat.
 type quoteDraft struct {
 	Step       string                 `json:"step"`
@@ -52,6 +56,9 @@ type quoteDraft struct {
 	// ClienteNuevo guarda datos de cliente a medio capturar (p. ej. nombre +
 	// teléfono) mientras el flujo pide la cédula que falta.
 	ClienteNuevo *cotizaciones.CrearClienteParams `json:"cliente_nuevo,omitempty"`
+	// SavedAt marca la última persistencia del borrador; loadDraft lo descarta
+	// si lleva más de draftTTL sin actividad.
+	SavedAt time.Time `json:"saved_at,omitempty"`
 }
 
 // flowManager maneja la máquina de estados por teléfono y las órdenes
@@ -128,6 +135,9 @@ func (f *flowManager) stepHint(ctx context.Context, phone string) string {
 func (f *flowManager) saveDraft(ctx context.Context, phone string) {
 	f.mu.Lock()
 	s, ok := f.sessions[phone]
+	if ok {
+		s.SavedAt = time.Now()
+	}
 	f.mu.Unlock()
 	if !ok {
 		return
@@ -164,6 +174,11 @@ func (f *flowManager) loadDraft(ctx context.Context, phone string) *quoteDraft {
 	// Un borrador sin paso es un estado corrupto/vacío: no resumirlo.
 	if s.Step == "" {
 		f.bot.log.Printf("Borrador de %s sin paso; descartado", phone)
+		return nil
+	}
+	// Borradores viejos sin actividad se descartan (no revivir un flujo muerto).
+	if s.SavedAt.IsZero() || time.Since(s.SavedAt) > draftTTL {
+		f.bot.log.Printf("Borrador de %s expirado (TTL); descartado", phone)
 		return nil
 	}
 	return &s
@@ -204,6 +219,12 @@ func (f *flowManager) start(phone string, emp *empleados.Empleado) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	f.bot.clearStateKey(ctx, phone, "ficha_pick")
+	// Un /cotizar nuevo invalida el listado previo: un número ya no debe
+	// imprimir la cotización N sino elegir la opción del flujo.
+	f.bot.clearStateKey(ctx, phone, "last_list")
+	f.mu.Lock()
+	delete(f.lastList, phone)
+	f.mu.Unlock()
 
 	versions, err := cotizaciones.ObtenerVersiones(ctx, f.supa, emp.SocioComercial)
 	if err != nil {
@@ -248,6 +269,32 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		return errNoFlow
 	}
 	defer f.saveDraft(ctx, phone)
+
+	// "cancelar" (con o sin /) cancela el flujo desde cualquier paso.
+	lowCmd := strings.ToLower(strings.TrimSpace(text))
+	if lowCmd == "cancelar" || lowCmd == "cancelar la cotizacion" || lowCmd == "cancelar cotizacion" {
+		f.bot.sendText(jidFor(phone), "Cotización cancelada.")
+		f.mu.Lock()
+		delete(f.sessions, phone)
+		f.mu.Unlock()
+		f.clearDraft(ctx, phone)
+		return nil
+	}
+
+	// Ambigüedad: si el mensaje es un número suelto que coincide con el último
+	// listado de cotizaciones mostrado, podría ser "imprimir la cotización N".
+	// start() limpia last_list, así que esto solo ocurre cuando el usuario pidió
+	// la lista con un flujo en curso: ceder al router (que imprimirá).
+	if rePickNumber.MatchString(strings.TrimSpace(text)) {
+		f.mu.Lock()
+		list, hasList := f.lastList[phone]
+		f.mu.Unlock()
+		if hasList {
+			if n, ok := parseIndex(text); ok && n >= 1 && n <= len(list) {
+				return errNeedsAssistant
+			}
+		}
+	}
 
 	switch s.Step {
 	case stepFormaPago:
@@ -621,6 +668,9 @@ func (f *flowManager) nextNumero(ctx context.Context, socioID int64) string {
 func (f *flowManager) list(phone string, emp *empleados.Empleado) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
+	// La lista de cotizaciones pasa a ser el contexto activo: limpiar picks de
+	// ficha para que un número suelto imprima la cotización y no una ficha vieja.
+	f.bot.clearStateKey(ctx, phone, "ficha_pick")
 	list, err := f.listadoCotizaciones(ctx, phone, emp)
 	if err != nil {
 		f.bot.sendText(jidFor(phone), "No pude listar las cotizaciones.")

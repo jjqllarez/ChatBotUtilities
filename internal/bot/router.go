@@ -130,6 +130,11 @@ func parseCatalogo(low string) bool {
 // handleRouterIntent ejecuta la intención determinista. Devuelve true si ya la
 // manejó (no debe seguir al LLM).
 func (b *Bot) handleRouterIntent(ctx context.Context, chat types.JID, phone string, emp *empleados.Empleado, text string) bool {
+	// Número suelto tras "Lista de cotizaciones": imprimir esa cotización
+	// (el flujo cede ante la ambigüedad con last_list en process()).
+	if b.handleListPick(ctx, chat, phone, emp, text) {
+		return true
+	}
 	switch classifyIntent(text) {
 	case intentCrearCotizacion:
 		b.flows.start(phone, emp)
@@ -259,6 +264,28 @@ func (b *Bot) handleFichaPick(ctx context.Context, chat types.JID, phone string,
 	}
 	b.sendText(chat, "No encontré ese vehículo.")
 	b.clearStateKey(ctx, phone, "ficha_pick")
+	return true
+}
+
+// handleListPick imprime la cotización N de la última lista de cotizaciones
+// cuando el usuario responde con un número suelto ("1", "el 2", "la 3") tras
+// "Lista de cotizaciones". Solo actúa si existe un listado reciente.
+func (b *Bot) handleListPick(ctx context.Context, chat types.JID, phone string, emp *empleados.Empleado, text string) bool {
+	m := rePickNumber.FindStringSubmatch(strings.TrimSpace(text))
+	if len(m) < 2 {
+		return false
+	}
+	n, _ := strconv.Atoi(m[1])
+	if _, ok := b.flows.pickCotizacion(phone, n); !ok {
+		b.flows.restoreLastList(ctx, phone)
+		if _, ok := b.flows.pickCotizacion(phone, n); !ok {
+			return false
+		}
+	}
+	r := b.toolImprimirCotizacion(ctx, chat, phone, emp, fmt.Sprintf(`{"indice":%d}`, n))
+	if directResultError(r) {
+		b.sendText(chat, r)
+	}
 	return true
 }
 
