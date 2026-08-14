@@ -705,18 +705,22 @@ func (f *flowManager) emit(ctx context.Context, phone string, emp *empleados.Emp
 	f.clearDraft(ctx, phone)
 }
 
-// nextNumero genera COT-YYMMDD-XXX.
+// nextNumero genera COT-YYMMDD-XXX a partir del maximo del dia (inmune a borrados).
 func (f *flowManager) nextNumero(ctx context.Context, socioID int64) string {
 	today := time.Now().Format("060102")
-	count := 0
-	if list, err := cotizaciones.ListarCotizaciones(ctx, f.supa, socioID, 200); err == nil {
+	prefix := "COT-" + today + "-"
+	maxN := 0
+	if list, err := cotizaciones.ListarCotizaciones(ctx, f.supa, socioID, 1000); err == nil {
 		for _, c := range list {
-			if strings.HasPrefix(c.NumeroPresupuesto, "COT-"+today) {
-				count++
+			if !strings.HasPrefix(c.NumeroPresupuesto, prefix) {
+				continue
+			}
+			if n, err := strconv.Atoi(strings.TrimPrefix(c.NumeroPresupuesto, prefix)); err == nil && n > maxN {
+				maxN = n
 			}
 		}
 	}
-	return fmt.Sprintf("COT-%s-%03d", today, count+1)
+	return fmt.Sprintf("%s%03d", prefix, maxN+1)
 }
 
 // list envía las cotizaciones del mes en curso. Los vendedores solo ven las
