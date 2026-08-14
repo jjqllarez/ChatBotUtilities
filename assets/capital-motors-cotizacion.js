@@ -91,7 +91,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
     this.render();
   }
 
-  _formatDireccion(direccion, maxChars = 35) {
+  _formatDireccion(direccion, maxChars = 30) {
     if (!direccion) return '';
     const palabras = String(direccion).split(' ');
     let lineas = [];
@@ -152,7 +152,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
       .logo-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
       .header-info { text-align: center; flex: 1; min-width: 0; padding: 0 5px; overflow: hidden; }
       .header-info h2 { font-size: 15px; margin: 0 0 2px 0; font-weight: bold; }
-      .header-info p { font-size: 8px; margin: 1px auto; text-transform: uppercase; max-width: 270px; word-break: break-word; line-height: 1.3; }
+      .header-info p { font-size: 8px; margin: 1px auto; text-transform: uppercase; max-width: 240px; word-break: break-word; line-height: 1.3; }
       .header-right { width: 170px; text-align: right; font-size: 10px; font-weight: bold; }
       .section-header { background-color: #d1d1d1; padding: 3px 6px; margin: 8px 0 5px 0; font-weight: bold; border: 1px solid #999; font-size: 12px; }
       .grid-top { display: flex; gap: 12px; margin: 5px 0; }
@@ -181,7 +181,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
             </div>
             <div class="header-info">
               <h2>${this._socioComercial.razon_social || 'CAPITAL MOTORS, C.A'}</h2>
-              <p>R.I.F.: ${this._socioComercial.rif || 'N/A'}</p><p class="header-dir">${this._formatDireccion(this._socioComercial.direccion, 35)}</p><p>TLF. ${this._socioComercial.telefono || ''} &nbsp;|&nbsp; ${this._socioComercial.correo || ''}</p>
+              <p>R.I.F.: ${this._socioComercial.rif || 'N/A'}</p><p class="header-dir">${this._formatDireccion(this._socioComercial.direccion, 30)}</p><p>TLF. ${this._socioComercial.telefono || ''} &nbsp;|&nbsp; ${this._socioComercial.correo || ''}</p>
             </div>
             <div class="header-right">
               <p style="color:#003366">PRESUPUESTO<br>N°: ${this._numeroPresupuesto}</p>
