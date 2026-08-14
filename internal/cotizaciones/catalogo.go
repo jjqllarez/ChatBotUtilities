@@ -71,30 +71,107 @@ func ObtenerVersiones(ctx context.Context, client *supabase.Client, socioID int6
 // trae la letra del documento ("V-16573081") y la búsqueda no encuentra nada,
 // reintenta con solo los dígitos ("16573081"), porque el RPC busca contra
 // numero_documento sin la letra.
+// Robustez: si el RPC falla (red/timeout) o no devuelve resultados, se hace un
+// fallback con SELECT directo por documento normalizado y por nombre (ilike),
+// de modo que la búsqueda solo falla si no hay ningún candidato local.
 func BuscarClientes(ctx context.Context, client *supabase.Client, socioID int64, term string) ([]Cliente, error) {
 	term = strings.TrimSpace(term)
 	var out []Cliente
-	err := client.RPC(ctx, "buscar_clientes", map[string]any{
+	rpcErr := client.RPC(ctx, "buscar_clientes", map[string]any{
 		"p_search_term":        term,
 		"p_socio_comercial_id": socioID,
 	}, &out)
-	if err != nil {
-		return out, err
+	if rpcErr == nil && len(out) > 0 {
+		return out, nil
+	}
+	// Fallback 1: documento con letra -> reintentar con solo los dígitos.
+	if rpcErr == nil {
+		if digits := docDigits(term); digits != "" && digits != term {
+			var out2 []Cliente
+			if err2 := client.RPC(ctx, "buscar_clientes", map[string]any{
+				"p_search_term":        digits,
+				"p_socio_comercial_id": socioID,
+			}, &out2); err2 == nil && len(out2) > 0 {
+				return out2, nil
+			}
+		}
+	}
+	// Fallback 2: SELECT directo por documento normalizado.
+	if digits := normalizeDoc(term); digits != "" {
+		rows, derr := client.Select(ctx, "clientes",
+			fmt.Sprintf("?select=*&socio_comercial_id=eq.%d&numero_documento=eq.%s&limit=10",
+				socioID, url.QueryEscape(digits)))
+		if derr == nil {
+			for _, r := range rows {
+				if c, cerr := clienteFromMap(r); cerr == nil {
+					out = append(out, c)
+				}
+			}
+		}
 	}
 	if len(out) > 0 {
 		return out, nil
 	}
-	// Término con letra de documento + número → reintentar sin la letra.
-	if digits := docDigits(term); digits != "" && digits != term {
-		var out2 []Cliente
-		if err2 := client.RPC(ctx, "buscar_clientes", map[string]any{
-			"p_search_term":        digits,
-			"p_socio_comercial_id": socioID,
-		}, &out2); err2 == nil && len(out2) > 0 {
-			return out2, nil
+	// Fallback 3: SELECT directo por nombre (contiene el término).
+	if rows, serr := client.Select(ctx, "clientes",
+		fmt.Sprintf("?select=*&socio_comercial_id=eq.%d&nombre_razon_social=ilike.*%s*&limit=10",
+			socioID, url.QueryEscape(term))); serr == nil {
+		for _, r := range rows {
+			if c, cerr := clienteFromMap(r); cerr == nil {
+				out = append(out, c)
+			}
 		}
 	}
-	return out, nil
+	if len(out) > 0 {
+		return out, nil
+	}
+	// Fallback 4: SELECT directo por teléfono (si el cliente ya existe por
+	// telefono_principal, encontrarlo antes de intentar registrarlo como nuevo).
+	if phone := phoneDigits(term); phone != "" {
+		rows, perr := client.Select(ctx, "clientes",
+			fmt.Sprintf("?select=*&socio_comercial_id=eq.%d&telefono_principal=eq.%s&limit=5",
+				socioID, url.QueryEscape(phone)))
+		if perr == nil {
+			for _, r := range rows {
+				if c, cerr := clienteFromMap(r); cerr == nil {
+					out = append(out, c)
+				}
+			}
+		}
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+	// Solo se propaga el error del RPC si no hubo ningún fallback exitoso.
+	return out, rpcErr
+}
+
+// phoneDigits deja solo los dígitos de un teléfono ("04141234567" o
+// "+58 414-1234567"); devuelve "" si no hay suficientes dígitos.
+func phoneDigits(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	digits := b.String()
+	if len(digits) >= 7 {
+		return digits
+	}
+	return ""
+}
+
+// normalizeDoc deja solo los dígitos de un documento ("V-014205368",
+// "E 12345678" o "14205368") eliminando letra, espacios y ceros a la izquierda.
+func normalizeDoc(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimLeft(b.String(), "0")
 }
 
 // docDigits extrae los dígitos de un documento con letra ("V-16573081",
@@ -109,39 +186,106 @@ func docDigits(term string) string {
 
 // BuscarClientePorDocumento busca el cliente exacto por socio + tipo de
 // documento + número de cédula (para resolver duplicados al crear).
+// Robustez: prueba el documento tal cual y su versión normalizada, y si no
+// hay coincidencia con el tipo exacto, acepta el primer cliente con ese
+// documento dentro del socio.
 func BuscarClientePorDocumento(ctx context.Context, client *supabase.Client, socioID int64, tipoDoc, cedula string) (*Cliente, error) {
+	tipoDoc = strings.ToUpper(strings.TrimSpace(tipoDoc))
 	if cedula == "" {
 		return nil, nil
 	}
-	rows, err := client.Select(ctx, "clientes",
-		fmt.Sprintf("?select=*&socio_comercial_id=eq.%d&tipo_documento=eq.%s&numero_documento=eq.%s&limit=1",
-			socioID, url.QueryEscape(tipoDoc), url.QueryEscape(cedula)))
-	if err != nil {
-		return nil, err
+	cands := []string{strings.TrimSpace(cedula), normalizeDoc(cedula)}
+	// 1) Con tipo de documento exacto.
+	for _, cand := range cands {
+		if cand == "" {
+			continue
+		}
+		q := fmt.Sprintf("?select=*&socio_comercial_id=eq.%d&numero_documento=eq.%s&limit=5",
+			socioID, url.QueryEscape(cand))
+		if tipoDoc != "" {
+			q += "&tipo_documento=eq." + url.QueryEscape(tipoDoc)
+		}
+		rows, err := client.Select(ctx, "clientes", q)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			c, cerr := clienteFromMap(r)
+			if cerr != nil {
+				continue
+			}
+			if tipoDoc != "" && strings.EqualFold(c.TipoDocumento, tipoDoc) {
+				return &c, nil
+			}
+		}
 	}
-	if len(rows) == 0 {
-		return nil, nil
+	// 2) Sin tipo: aceptar el primer cliente del socio con ese documento
+	//    (resuelve duplicados por tipo, p. ej. E- vs V-).
+	for _, cand := range cands {
+		if cand == "" {
+			continue
+		}
+		rows, err := client.Select(ctx, "clientes",
+			fmt.Sprintf("?select=*&socio_comercial_id=eq.%d&numero_documento=eq.%s&limit=1",
+				socioID, url.QueryEscape(cand)))
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		c, cerr := clienteFromMap(rows[0])
+		if cerr != nil {
+			return nil, cerr
+		}
+		return &c, nil
 	}
-	c, err := clienteFromMap(rows[0])
-	if err != nil {
-		return nil, err
-	}
-	return &c, nil
+	return nil, nil
 }
 
 // CrearCliente crea un cliente nuevo y devuelve su id.
+// Robustez: normaliza tipo/documento, verifica duplicado por documento ANTES
+// de insertar (evita el 409 y los duplicados), reintenta 2 veces ante errores
+// transitorios y, si el RPC responde 409 igualmente, resuelve el duplicado.
 func CrearCliente(ctx context.Context, client *supabase.Client, socioID int64, p CrearClienteParams) (int64, error) {
-	var raw json.RawMessage
-	err := client.RPC(ctx, "insertar_cliente_empleado", map[string]any{
-		"p_socio_comercial_id":  socioID,
-		"p_tipo_documento":      p.TipoDocumento,
-		"p_numero_documento":    p.NumeroDocumento,
-		"p_nombre_razon_social": p.NombreRazonSocial,
-		"p_correo":              p.Correo,
-		"p_telefono_principal":  p.TelefonoPrincipal,
-		"p_direccion":           p.Direccion,
-	}, &raw)
-	if err != nil {
+	p.TipoDocumento = strings.ToUpper(strings.TrimSpace(p.TipoDocumento))
+	p.NumeroDocumento = strings.TrimSpace(p.NumeroDocumento)
+	p.NombreRazonSocial = strings.TrimSpace(p.NombreRazonSocial)
+	if p.TipoDocumento != "" && p.NumeroDocumento != "" {
+		if ex, err := BuscarClientePorDocumento(ctx, client, socioID, p.TipoDocumento, p.NumeroDocumento); err == nil && ex != nil {
+			return ex.ID, nil
+		}
+	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		var raw json.RawMessage
+		err := client.RPC(ctx, "insertar_cliente_empleado", map[string]any{
+			"p_socio_comercial_id":  socioID,
+			"p_tipo_documento":      p.TipoDocumento,
+			"p_numero_documento":    p.NumeroDocumento,
+			"p_nombre_razon_social": p.NombreRazonSocial,
+			"p_correo":              p.Correo,
+			"p_telefono_principal":  p.TelefonoPrincipal,
+			"p_direccion":           p.Direccion,
+		}, &raw)
+		if err == nil {
+			// El RPC devuelve un objeto {"id": N, ...}; se acepta también un
+			// array por robustez.
+			var one struct {
+				ID int64 `json:"id"`
+			}
+			if json.Unmarshal(raw, &one) == nil && one.ID != 0 {
+				return one.ID, nil
+			}
+			var many []struct {
+				ID int64 `json:"id"`
+			}
+			if json.Unmarshal(raw, &many) == nil && len(many) > 0 {
+				return many[0].ID, nil
+			}
+			return 0, nil
+		}
+		lastErr = err
 		// El RPC puede fallar con 409 si el cliente ya existe (unique
 		// unq_cliente_por_socio): resolver el duplicado y devolver el id.
 		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "23505") {
@@ -151,23 +295,10 @@ func CrearCliente(ctx context.Context, client *supabase.Client, socioID int64, p
 					return ex.ID, nil
 				}
 			}
+			return 0, err
 		}
-		return 0, err
 	}
-	// El RPC devuelve un objeto {"id": N, ...}; se acepta también un array por robustez.
-	var one struct {
-		ID int64 `json:"id"`
-	}
-	if json.Unmarshal(raw, &one) == nil && one.ID != 0 {
-		return one.ID, nil
-	}
-	var many []struct {
-		ID int64 `json:"id"`
-	}
-	if json.Unmarshal(raw, &many) == nil && len(many) > 0 {
-		return many[0].ID, nil
-	}
-	return 0, nil
+	return 0, lastErr
 }
 
 // clienteFromMap convierte una fila REST de clientes en un Cliente.
