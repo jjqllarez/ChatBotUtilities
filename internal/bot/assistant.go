@@ -270,37 +270,15 @@ func (b *Bot) toolListar(ctx context.Context, chat types.JID, emp *empleados.Emp
 		Termino string `json:"termino"`
 	}
 	_ = json.Unmarshal([]byte(argsJSON), &args)
-	versions, err := cotizaciones.ObtenerVersiones(ctx, b.supa, emp.SocioComercial)
-	if err != nil {
-		return "Error listando catálogo: " + err.Error()
+	out, ids := b.buildCatalogoList(ctx, emp, args.Termino)
+	if strings.HasPrefix(out, "Error") {
+		return out
 	}
-	var b2 strings.Builder
-	n := 0
-	for _, v := range versions {
-		if args.Termino != "" && !containsFold(v.MarcaNombre+v.ModeloNombre+v.NombreVersion, args.Termino) {
-			continue
-		}
-		n++
-		nombre := displayName(v)
-		if v.ModeloNombre == "" {
-			nombre = v.NombreVersion
-		}
-		if n > 1 {
-			b2.WriteString("\n")
-		}
-		fmt.Fprintf(&b2, "%d. *%s* (ID: %d)\n   - Precios: Estandar: %s / Premium: %s / Flota: %s USD",
-			n, nombre, v.ID,
-			formatQ(v.PrecioEstandar), formatQ(v.PrecioPremium), formatQ(v.PrecioFlota))
-	}
-	if args.Termino != "" {
-		fmt.Fprintf(&b2, "\n(búsqueda: %s)", args.Termino)
-	}
-	out := strings.TrimRight(b2.String(), "\n")
 	if out == "" {
 		return "No hay vehículos disponibles."
 	}
 	b.sendText(chat, out)
-	return "Listado de " + itoa(n) + " vehículos enviado por WhatsApp con el formato exacto."
+	return "Listado de " + itoa(len(ids)) + " vehículos enviado por WhatsApp con el formato exacto."
 }
 
 func (b *Bot) toolCrearCotizacion(ctx context.Context, chat types.JID, phone string, emp *empleados.Empleado, argsJSON string) string {

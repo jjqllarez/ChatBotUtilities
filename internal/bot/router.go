@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow/types"
 
@@ -196,7 +197,7 @@ func (b *Bot) handleRouterIntent(ctx context.Context, chat types.JID, phone stri
 		}
 		return true
 	case intentCatalogo:
-		b.sendCatalogo(ctx, chat, emp, extractCatalogoTerm(text))
+		b.sendCatalogo(ctx, chat, phone, emp, extractCatalogoTerm(text))
 		return true
 	case intentListarCotizaciones:
 		b.flows.list(phone, emp)
@@ -351,13 +352,60 @@ func (b *Bot) sendFicha(ctx context.Context, chat types.JID, emp *empleados.Empl
 	return fmt.Sprintf("Ficha del vehículo %s %s enviada.", v.MarcaNombre, displayName(v))
 }
 
-// sendCatalogo envía el listado de vehículos (opcionalmente filtrado).
-func (b *Bot) sendCatalogo(ctx context.Context, chat types.JID, emp *empleados.Empleado, term string) {
-	args, _ := json.Marshal(map[string]any{"termino": term})
-	r := b.toolListar(ctx, chat, emp, string(args))
-	if strings.HasPrefix(r, "Error") {
-		b.sendText(chat, r)
+// sendCatalogo envía el listado de vehículos (opcionalmente filtrado) y activa
+// el CatalogoFlow para resolver la selección posterior ("8", "Id: 24").
+func (b *Bot) sendCatalogo(ctx context.Context, chat types.JID, phone string, emp *empleados.Empleado, term string) {
+	out, ids := b.buildCatalogoList(ctx, emp, term)
+	if strings.HasPrefix(out, "Error") {
+		b.sendText(chat, out)
+		return
 	}
+	if out == "" {
+		b.sendText(chat, "No hay vehículos disponibles.")
+		return
+	}
+	b.sendText(chat, out)
+	if phone != "" && len(ids) > 0 {
+		b.setStateIDs(ctx, phone, "catalogo_ids", ids)
+		state, _ := b.state.Get(ctx, phone)
+		state["catalogo_active"] = true
+		state["catalogo_ts"] = time.Now().Format(time.RFC3339)
+		_ = b.state.Set(ctx, phone, state)
+	}
+}
+
+// buildCatalogoList construye el listado numerado de vehículos y devuelve el
+// texto a enviar y los IDs en el MISMO orden de numeración (para que "8" = el
+// octavo elemento de la lista, y "Id: 24" = la versión 24).
+func (b *Bot) buildCatalogoList(ctx context.Context, emp *empleados.Empleado, term string) (string, []int64) {
+	versions, err := cotizaciones.ObtenerVersiones(ctx, b.supa, emp.SocioComercial)
+	if err != nil {
+		return "Error listando catálogo: " + err.Error(), nil
+	}
+	var b2 strings.Builder
+	ids := make([]int64, 0, len(versions))
+	n := 0
+	for _, v := range versions {
+		if term != "" && !containsFold(v.MarcaNombre+v.ModeloNombre+v.NombreVersion, term) {
+			continue
+		}
+		n++
+		ids = append(ids, v.ID)
+		nombre := displayName(v)
+		if v.ModeloNombre == "" {
+			nombre = v.NombreVersion
+		}
+		if n > 1 {
+			b2.WriteString("\n")
+		}
+		fmt.Fprintf(&b2, "%d. *%s* (ID: %d)\n   - Precios: Estandar: %s / Premium: %s / Flota: %s USD",
+			n, nombre, v.ID,
+			formatQ(v.PrecioEstandar), formatQ(v.PrecioPremium), formatQ(v.PrecioFlota))
+	}
+	if term != "" {
+		fmt.Fprintf(&b2, "\n(búsqueda: %s)", term)
+	}
+	return strings.TrimRight(b2.String(), "\n"), ids
 }
 
 // extractCatalogoTerm extrae el término de búsqueda de una petición de

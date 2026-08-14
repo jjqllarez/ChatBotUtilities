@@ -273,6 +273,13 @@ func (f *flowManager) cancel(phone string) {
 	if s != nil {
 		f.clearDraft(ctx, phone)
 	}
+	// Cancelar también los flujos composables activos (catálogo, cliente):
+	// /cancelar debe dejar todo el estado limpio.
+	for _, nombre := range []string{"catalogo_vehiculos", "registrar_cliente"} {
+		if fl := f.bot.flowRegistry.FindByName(nombre); fl != nil {
+			fl.Cancelar(phone)
+		}
+	}
 	f.bot.sendText(jidFor(phone), "Cotización cancelada.")
 }
 
