@@ -135,6 +135,14 @@ func (b *Bot) handleRouterIntent(ctx context.Context, chat types.JID, phone stri
 	if b.handleListPick(ctx, chat, phone, emp, text) {
 		return true
 	}
+	// "imprime la cotización" sin número: pedir el número (no dejar que el
+	// LLM alucine que imprimió algo).
+	if reImprimirIntencion.MatchString(norm(text)) {
+		if _, ok := parseImprimirCotizacion(text); !ok {
+			b.sendText(chat, "Indica el número de la cotización a imprimir. Ej: 'imprime la cotización 1'.")
+			return true
+		}
+	}
 	switch classifyIntent(text) {
 	case intentCrearCotizacion:
 		b.flows.start(phone, emp)
@@ -315,9 +323,10 @@ func (b *Bot) sendCatalogo(ctx context.Context, chat types.JID, emp *empleados.E
 // catálogo/precios ("precio del Paladin", "cuánto cuesta el RICH6 4x4").
 func extractCatalogoTerm(text string) string {
 	return extractTerm(text, []string{
-		"cuanto cuesta", "cuanto vale", "precio del", "precio de la", "precio de",
-		"precios", "catalogo", "catálogo", "lista de", "listado de",
-		"vehiculos disponibles", "carros disponibles",
+		"que precio tiene", "cuanto cuesta", "cuanto vale", "precio del",
+		"precio de la", "precio de", "precios", "catalogo", "catálogo",
+		"lista de", "listado de", "vehiculos disponibles", "carros disponibles",
+		"a cuanto", "a cuanto esta",
 	})
 }
 

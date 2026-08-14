@@ -485,6 +485,12 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 					f.askConfirmar(phone, s)
 					return nil
 				}
+				// No se pudo interpretar como cliente: si el mensaje es una
+				// petición de negocio (imprimir/ficha/catálogo/listar), que la
+				// atienda el router sin perder el flujo.
+				if classifyIntent(term) != intentConversacion {
+					return errNeedsAssistant
+				}
 				f.bot.sendText(jidFor(phone),
 					"No encontré ese cliente. Escribe sus datos así:\n"+
 						"TipoDoc,Cedula,Nombre,Telefono\n"+
@@ -1018,7 +1024,7 @@ func parseNuevoCliente(text string) (*cotizaciones.CrearClienteParams, bool) {
 		cleanTerm = strings.Replace(term, m, " ", 1)
 	}
 	nombre := strings.TrimSpace(strings.Join(strings.Fields(reNoLetras.ReplaceAllString(cleanTerm, " ")), " "))
-	if doc == "" && nombre == "" {
+	if doc == "" && phone == "" {
 		return nil, false
 	}
 	// Si no hay cédula, no usar el teléfono como documento: el flujo pedirá

@@ -24,6 +24,23 @@ var reVerboImprimir = regexp.MustCompile(`(?i)imprime|imprimir|imprimela|imprím
 // reListar detecta la intención de ver el listado de cotizaciones.
 var reListar = regexp.MustCompile(`(?i)listar|lista|listado|mostrar|mis|cuntas|cuantas|cada|todas|tengo|tiene|hay`)
 
+// reListarSolo detecta la intención de listar sin mencionar "cotización"
+// ("listar", "listame", "ver la lista", "listado"). El catálogo ("lista de
+// vehiculos") lo captura parseCatalogo antes que este intent.
+var reListarSolo = regexp.MustCompile(`(?i)(?:^|[^a-z])(?:listar|listame|lista|listado)(?:$|[^a-z])`)
+
+// reImprimirNumero acepta "imprime la 1", "imprímeme la 2" (sin la palabra
+// "cotización"); el número se resuelve contra el último listado.
+var reImprimirNumero = regexp.MustCompile(`(?i)imprim\w*[^0-9]{0,12}([0-9]{1,3})`)
+
+// reImprimirIntencion detecta la petición de imprimir una cotización aunque
+// no incluya el número ("imprime la cotización", "quiero imprimir la 3").
+var reImprimirIntencion = regexp.MustCompile(`(?i)imprim\w*[^0-9]{0,14}cotizaci[oó]n|cotizaci[oó]n[^0-9]{0,14}imprim\w*`)
+
+// reInterrogativoCrear descarta preguntas sobre CÓMO se cotiza (no son
+// órdenes de crear: "cómo hago una cotización?" explica, no inicia wizard).
+var reInterrogativoCrear = regexp.MustCompile(`(?i)^(como|cómo|que es|qué es|como se|como hago|cómo hago|como hacer|como haces|como funciona|cómo funciona|en que consiste|en qué consiste|explica|expliqueme|explícame|dime como|dime cómo|cual es el proceso|cuál es el proceso|cuales son los pasos|cuáles son los pasos|pasos para|procedimiento|que necesito|qué necesito)`)
+
 // reCrearCotizacion detecta la intención de CREAR una cotización.
 var reCrearCotizacion = regexp.MustCompile(`(?i)hazme|hacer|realiza|realizar|crea|crear|genera|generar|arma|necesito|quiero|cotizar|cotiza`)
 
@@ -68,18 +85,21 @@ func directResultError(r string) bool {
 // "imprime la cotización 1", "imprimir cotización 3", "muéstrame la cotización 2".
 func parseImprimirCotizacion(text string) (int, bool) {
 	low := norm(text)
-	if !strings.Contains(low, "cotizacion") || !reVerboImprimir.MatchString(low) {
-		return 0, false
+	// "imprime la cotización 1" (con la palabra cotización).
+	if strings.Contains(low, "cotizacion") && reVerboImprimir.MatchString(low) {
+		if m := reImprimirCotizacion.FindStringSubmatch(low); len(m) >= 2 {
+			if n, err := strconv.Atoi(m[1]); err == nil && n >= 1 {
+				return n, true
+			}
+		}
 	}
-	m := reImprimirCotizacion.FindStringSubmatch(low)
-	if len(m) < 2 {
-		return 0, false
+	// "imprime la 1", "imprímeme la 2": verbo imprimir + número suelto.
+	if m := reImprimirNumero.FindStringSubmatch(low); len(m) >= 2 {
+		if n, err := strconv.Atoi(m[1]); err == nil && n >= 1 {
+			return n, true
+		}
 	}
-	n, err := strconv.Atoi(m[1])
-	if err != nil || n < 1 {
-		return 0, false
-	}
-	return n, true
+	return 0, false
 }
 
 // parseFichaVehiculo extrae el ID de versión de frases como "ficha del
@@ -109,10 +129,12 @@ func parseFichaVehiculo(text string) (int, bool) {
 // "lista de cotizaciones", "cuántas cotizaciones tengo".
 func parseListarCotizaciones(text string) bool {
 	low := norm(text)
-	if !strings.Contains(low, "cotizacion") {
-		return false
+	if strings.Contains(low, "cotizacion") {
+		return reListar.MatchString(low)
 	}
-	return reListar.MatchString(low)
+	// "listar", "listame", "lista", "listado" a secas: listado de cotizaciones
+	// del mes (el catálogo ya fue capturado por parseCatalogo antes).
+	return reListarSolo.MatchString(low)
 }
 
 // parseIniciarCotizacion detecta peticiones de CREAR una cotización como
@@ -120,6 +142,9 @@ func parseListarCotizaciones(text string) bool {
 // mensaje pide listar/mostrar cotizaciones.
 func parseIniciarCotizacion(text string) bool {
 	low := norm(text)
+	if reInterrogativoCrear.MatchString(low) {
+		return false
+	}
 	if !reCrearCotizacion.MatchString(low) || !strings.Contains(low, "cotiza") {
 		return false
 	}
