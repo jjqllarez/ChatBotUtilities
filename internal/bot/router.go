@@ -161,7 +161,27 @@ func (b *Bot) handleRouterIntent(ctx context.Context, chat types.JID, phone stri
 			return true
 		}
 	}
-	switch classifyIntent(text) {
+	intentResult := classifyIntent(text)
+	if intentResult == intentConversacion {
+		flowName := b.preClasificarLLM(ctx, phone, emp, text)
+		switch flowName {
+		case "cotizacion":
+			intentResult = intentCrearCotizacion
+		case "listar_cotizaciones":
+			intentResult = intentListarCotizaciones
+		case "ficha_vehiculo":
+			intentResult = intentFichaVehiculo
+		case "catalogo_vehiculos":
+			intentResult = intentCatalogo
+		default:
+			if flow := b.flowRegistry.FindByName(flowName); flow != nil {
+				flow.Iniciar(phone, emp)
+				return true
+			}
+		}
+	}
+
+	switch intentResult {
 	case intentCrearCotizacion:
 		b.flows.start(phone, emp)
 		return true
