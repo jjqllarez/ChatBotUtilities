@@ -43,7 +43,7 @@ func (b *Bot) runAssistant(ctx context.Context, chat types.JID, phone string, em
 
 	// El LLM usa su propio contexto amplio: si el modelo principal cuelga, el
 	// failover necesita tiempo para probar los siguientes.
-	llmCtx, llmCancel := context.WithTimeout(context.Background(), 150*time.Second)
+	llmCtx, llmCancel := context.WithTimeout(ctx, 150*time.Second)
 	defer llmCancel()
 
 	for iter := 0; iter < 5; iter++ {
@@ -422,7 +422,11 @@ func (b *Bot) toolCrearCotizacion(ctx context.Context, chat types.JID, phone str
 	b.sendText(chat, "Cotización "+in.NumeroPresupuesto+" emitida.")
 	pdfBytes, perr := pdf.RenderPDF(det)
 	if perr != nil {
-		pdfBytes, _ = pdf.BuildCotizacion(det)
+		var ferr error
+		pdfBytes, ferr = pdf.BuildCotizacion(det)
+		if ferr != nil {
+			b.log.Printf("PDF fallback fpdf: %v", ferr)
+		}
 	}
 	if len(pdfBytes) > 0 {
 		b.sendMediaQueued(chat, pdfBytes, "application/pdf", in.NumeroPresupuesto+".pdf", false)
@@ -515,7 +519,11 @@ func (b *Bot) toolImprimirCotizacion(ctx context.Context, chat types.JID, phone 
 	var pdfBytes []byte
 	pdfBytes, err = pdf.RenderPDF(det)
 	if err != nil {
-		pdfBytes, _ = pdf.BuildCotizacion(det)
+		var ferr error
+		pdfBytes, ferr = pdf.BuildCotizacion(det)
+		if ferr != nil {
+			b.log.Printf("PDF fallback fpdf: %v", ferr)
+		}
 	}
 	if len(pdfBytes) > 0 {
 		b.sendMediaQueued(chat, pdfBytes, "application/pdf", c.NumeroPresupuesto+".pdf", false)
@@ -542,23 +550,30 @@ func (b *Bot) toolRecordar(ctx context.Context, phone, argsJSON string) string {
 	return fmt.Sprintf("Dato '%s' guardado.", args.Clave)
 }
 
-// isAdmin comprueba (con caché) si el empleado tiene el permiso admin_total.
+// isAdmin comprueba (con caché TTL) si el empleado tiene el permiso admin_total.
+type adminEntry struct {
+	admin bool
+	at    time.Time
+}
+
+const adminCacheTTL = 10 * time.Minute
+
 func (b *Bot) isAdmin(ctx context.Context, emp *empleados.Empleado) bool {
 	if emp.UserID == "" {
 		return false
 	}
+	now := time.Now()
 	b.adminCacheMu.Lock()
-	_, ok := b.adminCache[emp.UserID]
-	b.adminCacheMu.Unlock()
-	if ok {
-		return true
-	}
-	admin := b.queryAdmin(ctx, emp.UserID)
-	if admin {
-		b.adminCacheMu.Lock()
-		b.adminCache[emp.UserID] = struct{}{}
+	entry, ok := b.adminCache[emp.UserID]
+	if ok && now.Sub(entry.at) < adminCacheTTL {
 		b.adminCacheMu.Unlock()
+		return entry.admin
 	}
+	b.adminCacheMu.Unlock()
+	admin := b.queryAdmin(ctx, emp.UserID)
+	b.adminCacheMu.Lock()
+	b.adminCache[emp.UserID] = adminEntry{admin: admin, at: now}
+	b.adminCacheMu.Unlock()
 	return admin
 }
 

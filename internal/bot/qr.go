@@ -30,5 +30,5 @@ func (b *Bot) startQRServer() {
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(png)
 	})
-	_ = http.ListenAndServe(":"+b.qrPort, mux)
+	_ = http.ListenAndServe("127.0.0.1:"+b.qrPort, mux)
 }

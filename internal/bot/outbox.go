@@ -35,7 +35,7 @@ func (b *Bot) outWorker() {
 				}
 			}
 			if sendErr != nil {
-				b.log.Printf("Enviando a %s: %v", m.jid, sendErr)
+				b.log.Printf("Enviando a %s (media %q): %v", m.jid, m.filename, sendErr)
 			} else {
 				b.guard.markSent(m.jid.User)
 				// Persistir todo lo que el bot envía para que el asistente tenga

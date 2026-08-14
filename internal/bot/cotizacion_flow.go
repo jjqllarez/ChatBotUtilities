@@ -278,7 +278,7 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 			// Petición de catálogo/precios durante la elección de vehículo:
 			// atender de forma determinista, sin depender del LLM.
 			if esPeticionCatalogo(text) {
-				f.bot.toolListar(context.Background(), jidFor(phone), emp, "")
+				f.bot.toolListar(ctx, jidFor(phone), emp, "")
 				return nil
 			}
 			return errNeedsAssistant
@@ -495,7 +495,7 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 			f.mu.Lock()
 			delete(f.sessions, phone)
 			f.mu.Unlock()
-			f.clearDraft(context.Background(), phone)
+			f.clearDraft(ctx, phone)
 		default:
 			return errNeedsAssistant
 		}
@@ -583,7 +583,11 @@ func (f *flowManager) emit(ctx context.Context, phone string, emp *empleados.Emp
 	var pdfBytes []byte
 	pdfBytes, err = pdf.RenderPDF(det)
 	if err != nil {
-		pdfBytes, _ = pdf.BuildCotizacion(det)
+		var ferr error
+		pdfBytes, ferr = pdf.BuildCotizacion(det)
+		if ferr != nil {
+			f.bot.log.Printf("PDF fallback fpdf: %v", ferr)
+		}
 	}
 	if len(pdfBytes) > 0 {
 		f.bot.sendMediaQueued(to, pdfBytes, "application/pdf", numero+".pdf", false)
@@ -813,12 +817,11 @@ func parseIndex(text string) (int, bool) {
 func parseAmount(text string) (float64, error) {
 	clean := strings.ReplaceAll(strings.TrimSpace(text), ",", "")
 	clean = strings.ReplaceAll(clean, ".", "")
-	var ent, dec int
+	var ent int
 	_, err := fmt.Sscanf(clean, "%d", &ent)
 	if err != nil {
 		return 0, err
 	}
-	_ = dec
 	return float64(ent), nil
 }
 

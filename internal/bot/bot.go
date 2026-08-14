@@ -49,7 +49,7 @@ type Bot struct {
 	state   *StateStore
 
 	adminCacheMu sync.Mutex
-	adminCache   map[string]struct{}
+	adminCache   map[string]adminEntry
 
 	qrMu     sync.Mutex
 	latestQR string
@@ -57,6 +57,7 @@ type Bot struct {
 	reconnect chan struct{}
 	out       chan outMsg
 	stop      chan struct{}
+	sem       chan struct{}
 }
 
 // outMsg es un mensaje de salida en cola (texto o adjunto).
@@ -105,7 +106,8 @@ func New(container DeviceContainer, supa *supabase.Client, qrPort string, llmCli
 		llmClient:  llmClient,
 		log:        logger,
 		guard:      newGuard(),
-		adminCache: make(map[string]struct{}),
+		adminCache: make(map[string]adminEntry),
+		sem:        make(chan struct{}, 8),
 		out:        make(chan outMsg, 64),
 		stop:       make(chan struct{}),
 		reconnect:  make(chan struct{}, 1),
@@ -132,7 +134,11 @@ func (b *Bot) initClient(device *store.Device) {
 func (b *Bot) eventHandler(ev interface{}) {
 	switch v := ev.(type) {
 	case *events.Message:
-		go b.handleMessage(v)
+		b.sem <- struct{}{} // límite de concurrencia anti-saturación
+		go func(v *events.Message) {
+			defer func() { <-b.sem }()
+			b.handleMessage(v)
+		}(v)
 	case *events.QR:
 		b.displayQR(v.Codes)
 	case *events.LoggedOut:
@@ -180,7 +186,9 @@ func (b *Bot) onLoggedOut() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if b.client.Store != nil && b.client.Store.ID != nil {
-		_ = b.container.DeleteDevice(ctx, b.client.Store)
+		if err := b.container.DeleteDevice(ctx, b.client.Store); err != nil {
+			b.log.Printf("Borrando dispositivo: %v", err)
+		}
 	}
 	b.client.Disconnect()
 
@@ -463,7 +471,7 @@ func (b *Bot) runAssistantV2(ctx context.Context, chat types.JID, phone string, 
 	}
 	messages = append(messages, llm.Message{Role: "user", Content: text})
 
-	llmCtx, llmCancel := context.WithTimeout(context.Background(), 150*time.Second)
+	llmCtx, llmCancel := context.WithTimeout(ctx, 150*time.Second)
 	defer llmCancel()
 	resp, err := b.llmClient.Chat(llmCtx, messages, nil)
 	if err != nil {
