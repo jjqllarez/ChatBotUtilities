@@ -339,3 +339,46 @@ supabase db query --linked "SELECT pg_notify('pgrst','reload schema');"  # recar
    WhatsApp → Dispositivos vinculados → Vincular dispositivo.
 3. La sesión se guarda en `whatsmeow_device`.
 4. Desde el teléfono, un empleado le escribe al bot → saluda según la hora de Venezuela y responde con el asistente.
+
+---
+
+## 9) Cómo agregar un flujo nuevo (Protocolo de Arquitectura Escalable)
+
+Prerequisitos: entender la interfaz \Flow\ en \internal/bot/flow.go\.
+
+### Paso 1 — SQL en Supabase (tabla \ot_flows\)
+\\\sql
+INSERT INTO bot_flows (socio_comercial, nombre, descripcion, frases_ejemplo, orden)
+VALUES (1, '<nombre>', '<descripcion para el LLM clasificador>', ARRAY['frase1', 'frase2'], <orden>);
+\\\
+
+### Paso 2 — Crear la implementación de \Flow\ en Go
+Crear \internal/bot/flow_<nombre>.go\ implementando la interfaz \Flow\:
+- Tipo \FlowAutonomo\: el usuario lo inicia directamente.
+- Tipo \FlowComposable\: puede iniciarse solo O ser llamado desde otro flujo.
+  - Implementar \IniciarComo(phone, emp, params)\ para recibir datos del padre.
+  - \FlowResult.Datos\ debe incluir los datos que el padre requiere al completar.
+
+### Paso 3 — Registrar en \main.go\
+\\\go
+b.RegisterFlow(bot.New<Nombre>Flow(b))
+\\\
+
+### Paso 4 — Tests
+Agregar casos en \internal/bot/intent_test.go\:
+- Casos en \TestClassifyIntent\
+- Casos negativos para confirmar que no chocan
+
+### Paso 5 — Compilar, desplegar y verificar
+\\\ash
+./build.sh
+sudo ./deploy.sh
+sudo journalctl -u whatsbot -n 20 --no-pager
+\\\
+
+### Reglas de oro para flujos
+1. **Estado en Supabase**: toda variable de estado del flujo se guarda en \ot_chat_state\ con un prefijo único.
+2. **TTL obligatorio**: todo borrador de flujo debe tener un tiempo de expiración (60 min mínimo).
+3. **Cancelable**: el flujo DEBE responder a \/cancelar\ limpiando su estado.
+4. **Independiente**: los flujos no llaman métodos de otros flujos directamente — usan el registro de flujos.
+5. **Tests primero**: ejecutar \go test ./internal/bot/\ antes de cada deploy.
