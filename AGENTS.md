@@ -342,43 +342,67 @@ supabase db query --linked "SELECT pg_notify('pgrst','reload schema');"  # recar
 
 ---
 
-## 9) Cómo agregar un flujo nuevo (Protocolo de Arquitectura Escalable)
+## 9) Sistema de Flujos Escalables (Arquitectura Modular)
 
-Prerequisitos: entender la interfaz `Flow` en `internal/bot/flow.go`.
+### 9.1 ¿Para qué sirve la tabla `bot_flows` en Supabase?
+La tabla `bot_flows` es la **fuente de verdad dinámica** de los flujos conversacionales.
+- `socio_comercial` (int): Aislamiento por concesionaria/agencia (multi-tenant).
+- `nombre` (text): Identificador único del flujo (ej. `cotizacion`, `catalogo_vehiculos`, `registrar_cliente`).
+- `descripcion` (text): Descripción en lenguaje natural que el LLM pre-clasificador utiliza para entender la intención.
+- `frases_ejemplo` (text[]): Frases típicas de los usuarios para entrenar contextualmente la clasificación.
+- `activo` (bool): Permite activar/desactivar flujos por concesionaria sin redeploy.
+- `orden` (int): Prioridad de evaluación.
 
-### Paso 1 — SQL en Supabase (tabla `bot_flows`)
-```sql
-INSERT INTO bot_flows (socio_comercial, nombre, descripcion, frases_ejemplo, orden)
-VALUES (1, '<nombre>', '<descripcion para el LLM clasificador>', ARRAY['frase1', 'frase2'], <orden>);
-```
+**Propósito**: El `preClasificarLLM` lee esta tabla en tiempo real (con caché TTL de 30 min). Cuando un mensaje es ambiguo y ningún regex determinista lo clasifica, el LLM consulta los flujos de esta tabla para decidir a cuál despachar. Al insertar un flujo en la BD, **el LLM lo aprende automáticamente sin tocar código de prompt**.
 
-### Paso 2 — Crear la implementación de `Flow` en Go
-Crear `internal/bot/flow_<nombre>.go` implementando la interfaz `Flow`:
-- Tipo `FlowAutonomo`: el usuario lo inicia directamente.
-- Tipo `FlowComposable`: puede iniciarse solo O ser llamado desde otro flujo.
-  - Implementar `IniciarComo(phone, emp, params)` para recibir datos del padre.
-  - `FlowResult.Datos` debe incluir los datos que el padre requiere al completar.
+### 9.2 Cómo AGREGAR un flujo nuevo
 
-### Paso 3 — Registrar en `main.go`
-```go
-b.RegisterFlow(bot.New<Nombre>Flow(b))
-```
+1. **Insertar en Supabase (`bot_flows`)**:
+   ```sql
+   INSERT INTO bot_flows (socio_comercial, nombre, descripcion, frases_ejemplo, orden)
+   VALUES (1, 'seguro', 'El vendedor quiere solicitar o cotizar una póliza de seguro vehicular.', ARRAY['cotizar seguro', 'quiero seguro para la camioneta'], 60);
+   ```
 
-### Paso 4 — Tests
-Agregar casos en `internal/bot/intent_test.go`:
-- Casos en `TestClassifyIntent`
-- Casos negativos para confirmar que no chocan
+2. **Crear la clase del flujo en Go (`internal/bot/flow_<nombre>.go`)**:
+   Implementar la interfaz `Flow` (`internal/bot/flow.go`):
+   - `Nombre()` string -> devuelve `"seguro"`
+   - `Tipo()` FlowTipo -> `FlowAutonomo` (si lo inicia el usuario) o `FlowComposable` (si otro flujo lo puede invocar como sub-rutina)
+   - `Activo(ctx, phone)` bool -> consulta si hay un borrador o estado activo en `bot_chat_state`
+   - `Iniciar(phone, emp)` -> envía el primer mensaje y guarda estado inicial
+   - `IniciarComo(phone, emp, params)` -> si es `FlowComposable`, recibe parámetros del flujo padre
+   - `Procesar(ctx, phone, emp, text)` -> máquina de estados del flujo, devuelve `FlowResult{Completado: bool, Datos: map}`
+   - `Cancelar(phone)` -> limpia el estado en `bot_chat_state` al escribir `/cancelar`
+   - `StepHint(ctx, phone)` -> pista textual del paso actual para el prompt del LLM de conversación
 
-### Paso 5 — Compilar, desplegar y verificar
-```bash
-./build.sh
-sudo ./deploy.sh
-sudo journalctl -u whatsbot -n 20 --no-pager
-```
+3. **Registrar en `main.go`**:
+   ```go
+   b.RegisterFlow(bot.NewSeguroFlow(b))
+   ```
 
-### Reglas de oro para flujos
-1. **Estado en Supabase**: toda variable de estado del flujo se guarda en `bot_chat_state` con un prefijo único.
-2. **TTL obligatorio**: todo borrador de flujo debe tener un tiempo de expiración (60 min mínimo).
-3. **Cancelable**: el flujo DEBE responder a `/cancelar` limpiando su estado.
-4. **Independiente**: los flujos no llaman métodos de otros flujos directamente — usan el registro de flujos.
-5. **Tests primero**: ejecutar `go test ./internal/bot/` antes de cada deploy.
+4. **Agregar pruebas unitarias en `internal/bot/intent_test.go`**:
+   Añadir al menos 3 casos positivos y 2 negativos en `TestClassifyIntent`.
+
+5. **Compilar y desplegar**:
+   ```bash
+   ./build.sh
+   sudo ./deploy.sh
+   ```
+
+### 9.3 Cómo MODIFICAR un flujo existente
+
+1. **Si cambias los activadores o la descripción**:
+   Actualiza la fila correspondiente en `bot_flows` en Supabase. No requiere redeploy (el caché de 30 min se actualizará solo o al reiniciar el servicio).
+2. **Si añades o cambias un paso interno**:
+   Edita únicamente el archivo Go del flujo (`internal/bot/flow_<nombre>.go` o `cotizacion_flow.go`).
+   - Mantén las variables de estado en `bot_chat_state` usando el prefijo propio del flujo (ej: `cot_step`, `seg_step`).
+   - Asegúrate de actualizar `StepHint()` para que el LLM de conversación sepa orientar al usuario si este hace preguntas fuera del wizard.
+   - Asegúrate de actualizar `Cancelar()` si agregaste nuevas claves de estado para evitar borradores huérfanos.
+3. **Correr los tests**:
+   `go test ./internal/bot/` **siempre** antes de hacer deploy para asegurar que las intenciones y parsers no se hayan roto.
+
+### 9.4 Reglas de Oro de los Flujos
+1. **Estado en Supabase**: Toda variable de estado del flujo se guarda en `bot_chat_state` con un prefijo único por flujo.
+2. **TTL obligatorio**: Todo borrador de flujo debe tener tiempo de expiración (60 min mínimo).
+3. **Cancelable**: El flujo DEBE responder a `/cancelar` limpiando todo su estado.
+4. **Independiente**: Un flujo no llama métodos de otros flujos directamente — usa el registro/mecanismo de composición (`FlowComposable`).
+5. **Tests primero**: Ejecutar `go test ./internal/bot/` antes de cada deploy.
