@@ -16,6 +16,8 @@ echo "==> Copiar binario a $BIN"
 sudo cp "$REPO/bot" "$BIN.new"
 sudo chown www-data:www-data "$BIN.new"
 sudo mv -f "$BIN.new" "$BIN"
+sudo cp -r "$REPO/assets/." "/opt/whatsbot/assets/"
+sudo chown -R www-data:www-data "/opt/whatsbot/assets"
 
 echo "==> Reiniciar $SVC"
 sudo systemctl restart "$SVC"
