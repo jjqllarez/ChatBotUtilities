@@ -91,6 +91,23 @@ class CapitalMotorsCotizacion extends HTMLElement {
     this.render();
   }
 
+  _formatDireccion(direccion, maxChars = 40) {
+    if (!direccion) return '';
+    const palabras = direccion.split(' ');
+    let lineas = [];
+    let lineaActual = '';
+    for (const palabra of palabras) {
+      if ((lineaActual + ' ' + palabra).trim().length > maxChars) {
+        if (lineaActual) lineas.push(lineaActual.trim());
+        lineaActual = palabra;
+      } else {
+        lineaActual = (lineaActual + ' ' + palabra).trim();
+      }
+    }
+    if (lineaActual) lineas.push(lineaActual.trim());
+    return lineas.join('<br>');
+  }
+
   connectedCallback() {
     this.render();
     setTimeout(() => { this._ajustarEscala(); this._ajustarEscalaAncho(); }, 50);
@@ -135,7 +152,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
       .logo-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
       .header-info { text-align: center; flex: 1; }
       .header-info h2 { font-size: 16px; margin: 0; }
-      .header-info p { font-size: 8px; margin: 2px 0; text-transform: uppercase; }
+      .header-info p { font-size: 8px; margin: 2px auto; text-transform: uppercase; max-width: 40ch; word-wrap: break-word; }
       .header-right { width: 170px; text-align: right; font-size: 10px; font-weight: bold; }
       .section-header { background-color: #d1d1d1; padding: 3px 6px; margin: 8px 0 5px 0; font-weight: bold; border: 1px solid #999; font-size: 12px; }
       .grid-top { display: flex; gap: 12px; margin: 5px 0; }
@@ -160,11 +177,11 @@ class CapitalMotorsCotizacion extends HTMLElement {
         <div class="content-flow">
           <div class="header-container">
             <div class="logo-box">
-              <img src="/dongfeng.png" alt="Dongfeng">
+              <img src="${this._socioComercial.logo_url || '/dongfeng.png'}" alt="${this._socioComercial.razon_social || 'Dongfeng'}">
             </div>
             <div class="header-info">
               <h2>${this._socioComercial.razon_social || 'CAPITAL MOTORS, C.A'}</h2>
-              <p>R.I.F.: ${this._socioComercial.rif || 'N/A'}<br>${this._socioComercial.direccion || ''}  TLF. ${this._socioComercial.telefono || ''}  ${this._socioComercial.correo || ''}</p>
+              <p>R.I.F.: ${this._socioComercial.rif || 'N/A'}<br>${this._formatDireccion(this._socioComercial.direccion, 40)}<br>TLF. ${this._socioComercial.telefono || ''}  ${this._socioComercial.correo || ''}</p>
             </div>
             <div class="header-right">
               <p style="color:#003366">PRESUPUESTO<br>N°: ${this._numeroPresupuesto}</p>
