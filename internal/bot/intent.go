@@ -123,6 +123,10 @@ func parseIniciarCotizacion(text string) bool {
 	if !reCrearCotizacion.MatchString(low) || !strings.Contains(low, "cotiza") {
 		return false
 	}
+	if strings.Contains(low, "imprime") || strings.Contains(low, "imprimir") ||
+		strings.Contains(low, "imprimeme") || strings.Contains(low, "reimprime") {
+		return false
+	}
 	return !reListar.MatchString(low)
 }
 
