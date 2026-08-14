@@ -267,6 +267,13 @@ y corregidas en caliente:
   "Consultar") renderizado como PNG. El prefijo de precio se autocorta al tamaño exacto de la card (`trimPNG`).
   Solo se envía cuando el usuario la pide expresamente ("foto del vehículo", "card", "ficha"); NO en el flujo de
   cotización.
+  - **Selección de tipo de precio en el catálogo** (`internal/bot/flow_catalogo.go`): al elegir un vehículo del
+    catálogo ("8", "Id: 24"), el bot NO envía la card de inmediato: pregunta el tipo de precio —
+    `1) Estándar 2) Premium 3) Flota` y, **solo para administradores**, `4) Precio personalizado (teclear el precio)`.
+    La card se renderiza con `sendFicha(..., tipoPrecio, custom)` (usa `PrecioPorTipo` o el monto a medida si es admin).
+    Estados en `bot_chat_state` con prefijo `catalogo_`: `catalogo_active/ids/ts` (catálogo + TTL 30 min),
+    `catalogo_sel` (versión elegida), `catalogo_wait` (esperando tipo de precio), `catalogo_custom` (esperando monto
+    personalizado). `parseTipoPrecio` cubre número o nombre ("estandar", "premium", "flota", "personalizado").
 
 ## Asistente LLM (OpenRouter) — comportamientos clave
 - **Saludo con hora Venezuela**: el primer mensaje de cada chat (sin historial) saluda "Buenos días/tardes/noches +

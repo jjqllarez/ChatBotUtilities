@@ -328,3 +328,40 @@ func TestNorm(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTipoPrecio(t *testing.T) {
+	pos := []struct {
+		in   string
+		want string
+	}{
+		{"1", "estandar"},
+		{"2", "premium"},
+		{"3", "flota"},
+		{"4", "custom"},
+		{"estandar", "estandar"},
+		{"estándar", "estandar"},
+		{"premium", "premium"},
+		{"flota", "flota"},
+		{"personalizado", "custom"},
+		{"precio personalizado", "custom"},
+		{"a medida", "custom"},
+		{"el 2", "premium"},
+		{"opción 3", "flota"},
+	}
+	for _, tc := range pos {
+		t.Run("pos:"+tc.in, func(t *testing.T) {
+			if got := parseTipoPrecio(tc.in); got != tc.want {
+				t.Errorf("parseTipoPrecio(%q) = %q, quería %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	neg := []string{"", "hola", "5", "vehiculo", "ninguno", "-1"}
+	for _, in := range neg {
+		t.Run("neg:"+in, func(t *testing.T) {
+			if got := parseTipoPrecio(in); got != "" {
+				t.Errorf("parseTipoPrecio(%q) = %q, quería vacío", in, got)
+			}
+		})
+	}
+}
+

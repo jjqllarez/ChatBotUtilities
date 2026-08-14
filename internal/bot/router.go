@@ -533,3 +533,39 @@ func (b *Bot) clearStateKey(ctx context.Context, phone, key string) {
 	delete(state, key)
 	_ = b.state.Set(ctx, phone, state)
 }
+
+// setStateBool guarda un booleano en el estado persistente del chat.
+func (b *Bot) setStateBool(ctx context.Context, phone, key string, val bool) {
+	state, _ := b.state.Get(ctx, phone)
+	state[key] = val
+	_ = b.state.Set(ctx, phone, state)
+}
+
+// getStateBool lee un booleano del estado persistente del chat.
+func (b *Bot) getStateBool(ctx context.Context, phone, key string) bool {
+	state, _ := b.state.Get(ctx, phone)
+	v, _ := state[key].(bool)
+	return v
+}
+
+// setStateInt guarda un entero en el estado persistente del chat.
+func (b *Bot) setStateInt(ctx context.Context, phone, key string, val int64) {
+	state, _ := b.state.Get(ctx, phone)
+	data, _ := json.Marshal(val)
+	state[key] = string(data)
+	_ = b.state.Set(ctx, phone, state)
+}
+
+// getStateInt lee un entero del estado persistente del chat.
+func (b *Bot) getStateInt(ctx context.Context, phone, key string) int64 {
+	state, _ := b.state.Get(ctx, phone)
+	raw, ok := state[key].(string)
+	if !ok || raw == "" {
+		return 0
+	}
+	var n int64
+	if json.Unmarshal([]byte(raw), &n) != nil {
+		return 0
+	}
+	return n
+}
