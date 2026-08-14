@@ -416,13 +416,22 @@ func (b *Bot) handleMessageV2(ev *events.Message) {
 	if b.flows.handleCommand(phone, emp, text) {
 		return
 	}
-	flowActive := b.flows.active(ctx, phone)
+	activeFlow := b.flowRegistry.ActiveFlow(ctx, phone)
+	flowActive := activeFlow != nil || b.flows.active(ctx, phone)
 	// Selección pendiente de ficha (solo cuando no hay flujo /cotizar activo).
 	if !flowActive && b.handleFichaPick(ctx, ev.Info.Chat, phone, emp, text) {
 		return
 	}
 	if flowActive {
-		err := b.flows.process(ctx, phone, emp, text)
+		var err error
+		stepHint := ""
+		if activeFlow != nil {
+			_, err = activeFlow.Procesar(ctx, phone, emp, text)
+			stepHint = activeFlow.StepHint(ctx, phone)
+		} else {
+			err = b.flows.process(ctx, phone, emp, text)
+			stepHint = b.flows.stepHint(ctx, phone)
+		}
 		if err == errNeedsAssistant {
 			// Interrupción del flujo: primero el router determinista (ficha,
 			// imprimir, catálogo, listar); si no es negocio, conversación.
@@ -433,7 +442,7 @@ func (b *Bot) handleMessageV2(ev *events.Message) {
 				b.sendText(ev.Info.Chat, "Comandos: /cotizar, /listar, /cancelar.")
 				return
 			}
-			b.runAssistantV2(ctx, ev.Info.Chat, phone, emp, text, b.flows.stepHint(ctx, phone))
+			b.runAssistantV2(ctx, ev.Info.Chat, phone, emp, text, stepHint)
 			return
 		}
 		if err != nil && err != errNoFlow {
