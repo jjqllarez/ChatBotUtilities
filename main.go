@@ -78,6 +78,8 @@ func main() {
 
 	// Registrar flujos en el registry (agregar nuevos flujos aqui).
 	b.RegisterFlow(bot.NewCotizacionFlow(b))
+	b.RegisterFlow(bot.NewCatalogoFlow(b))
+	b.RegisterFlow(bot.NewRegistrarClienteFlow(b))
 
 	if err := b.Run(stop); err != nil {
 		fmt.Fprintln(os.Stderr, "Bot terminó con error:", err)
