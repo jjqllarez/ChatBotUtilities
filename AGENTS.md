@@ -45,8 +45,14 @@ go/
   internal/llm/client.go            # cliente OpenRouter (chat + tools + transcripción audio)
   internal/pdf/browser.go|cotizacion.go|vehiclecard.go # PDF/PNG de cotización y card con Chromium (+ fallback fpdf)
   internal/bot/bot.go               # client whatsmeow, QR, eventos, manejo de mensajes, re-vinculación
-  internal/bot/cotizacion_flow.go   # máquina de estados del flujo /cotizar y /listar por chat
-  internal/bot/assistant.go         # asistente LLM con tools y agent loop
+  internal/bot/cotizacion_flow.go   # flowManager legacy (/cotizar y /listar): máquina de estados + tools
+  internal/bot/cotizacion_wrapper.go# CotizacionFlow: wrapper Flow sobre el flowManager legacy (sin tocar su lógica)
+  internal/bot/flow.go              # interfaz Flow, FlowResult, FlowRegistry (registro + caché bot_flows 30 min)
+  internal/bot/flow_catalogo.go     # CatalogoFlow (catalogo_vehiculos, FlowComposable)
+  internal/bot/flow_cliente.go      # RegistrarClienteFlow (registrar_cliente, FlowComposable)
+  internal/bot/preclasificador.go   # preClasificarLLM: clasifica mensajes ambiguos usando bot_flows
+  internal/bot/router.go            # router determinista V2 (classifyIntent) + handleRouterIntent con preclasificador
+  internal/bot/assistant.go         # asistente LLM (sin tools en V2) + runAssistantV2
   internal/bot/history.go|state.go  # memoria persistente + estado de conversación (Supabase)
   internal/bot/guards.go            # anti-baneo (cola de salida, ritmo, cuota diaria)
 ```
@@ -290,6 +296,9 @@ y corregidas en caliente:
   whatsmeow (device, sessions, pre_keys, identity_keys, sender_keys, app_state_*, contacts, chat_settings,
   message_secrets, privacy_tokens, nct_salt, event_buffer, retry_buffer, lid_map).
 - `bot_chat_history` y `bot_chat_state`: memoria (mensajes) y estado (draft/contexto) del asistente LLM por teléfono.
+- `bot_flows`: metadatos dinámicos de los flujos conversacionales (multi-tenant por `socio_comercial`). Es la fuente de
+  verdad que lee el `preClasificarLLM` para despachar mensajes ambiguos (ver Sección 9). No hay migración SQL versionada:
+  las filas se insertan/editan directo en Supabase (ver 9.2/9.3).
 - Tablas del CRM (compartidas, no modificadas por el bot): `cotizaciones`, `clientes`, `versiones_vehiculos`,
   `historial_precios`, `planes_financiamiento`, `entes_financieros`, `socio_comercial`, `marcas`, `modelos`,
   `cargos`, `historial_cargos`, `permisos`, `cargo_permiso` (roles/permisos; `admin_total` = administrador).
@@ -365,14 +374,19 @@ La tabla `bot_flows` es la **fuente de verdad dinámica** de los flujos conversa
 
 2. **Crear la clase del flujo en Go (`internal/bot/flow_<nombre>.go`)**:
    Implementar la interfaz `Flow` (`internal/bot/flow.go`):
-   - `Nombre()` string -> devuelve `"seguro"`
-   - `Tipo()` FlowTipo -> `FlowAutonomo` (si lo inicia el usuario) o `FlowComposable` (si otro flujo lo puede invocar como sub-rutina)
+   - `Nombre()` string -> devuelve `"seguro"` (debe coincidir con `bot_flows.nombre`)
+   - `Tipo()` FlowTipo -> `FlowAutonomo` (lo inicia el usuario) o `FlowComposable` (también invocable como sub-rutina)
    - `Activo(ctx, phone)` bool -> consulta si hay un borrador o estado activo en `bot_chat_state`
    - `Iniciar(phone, emp)` -> envía el primer mensaje y guarda estado inicial
    - `IniciarComo(phone, emp, params)` -> si es `FlowComposable`, recibe parámetros del flujo padre
    - `Procesar(ctx, phone, emp, text)` -> máquina de estados del flujo, devuelve `FlowResult{Completado: bool, Datos: map}`
    - `Cancelar(phone)` -> limpia el estado en `bot_chat_state` al escribir `/cancelar`
    - `StepHint(ctx, phone)` -> pista textual del paso actual para el prompt del LLM de conversación
+
+   Ejemplos reales: `flow_catalogo.go` (CatalogoFlow, `catalogo_vehiculos`, FlowComposable),
+   `flow_cliente.go` (RegistrarClienteFlow, `registrar_cliente`, FlowComposable) y
+   `cotizacion_wrapper.go` (CotizacionFlow, `cotizacion`, FlowAutonomo — delega todo el
+   wizard al flowManager legacy de `cotizacion_flow.go`).
 
 3. **Registrar en `main.go`**:
    ```go
