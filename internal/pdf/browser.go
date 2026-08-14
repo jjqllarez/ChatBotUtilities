@@ -49,6 +49,7 @@ func RenderPDF(d *cotizaciones.Detalle) ([]byte, error) {
 		"file:///" + filepath.ToSlash(htmlPath),
 	}
 	cmd := exec.Command(chrome, args...)
+	cmd.Env = append(os.Environ(), "HOME="+tmp, "XDG_CONFIG_HOME="+tmp)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -98,6 +99,7 @@ func RenderPNG(d *cotizaciones.Detalle) ([]byte, error) {
 		"file:///" + filepath.ToSlash(htmlPath),
 	}
 	cmd := exec.Command(chrome, args...)
+	cmd.Env = append(os.Environ(), "HOME="+tmp, "XDG_CONFIG_HOME="+tmp)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

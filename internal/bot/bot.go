@@ -233,8 +233,17 @@ func (b *Bot) Run(stop <-chan struct{}) error {
 	}
 }
 
-// handleMessage procesa un mensaje entrante.
+// handleMessage despacha el mensaje según la versión activa (flag BOT_V2).
 func (b *Bot) handleMessage(ev *events.Message) {
+	if os.Getenv("BOT_V2") == "true" {
+		b.handleMessageV2(ev)
+		return
+	}
+	b.handleMessageLegacy(ev)
+}
+
+// handleMessageLegacy es el pipeline v1: router intent.go + LLM con tools.
+func (b *Bot) handleMessageLegacy(ev *events.Message) {
 	if ev.Info.IsFromMe || ev.Info.IsGroup {
 		return
 	}
@@ -329,6 +338,156 @@ func (b *Bot) handleMessage(ev *events.Message) {
 		return
 	}
 	b.runAssistant(ctx, ev.Info.Chat, phone, emp, text, "")
+}
+
+// handleMessageV2 es el pipeline v2 (flag BOT_V2): router determinista
+// (classifyIntent) para todo el negocio y LLM solo para conversación.
+func (b *Bot) handleMessageV2(ev *events.Message) {
+	if ev.Info.IsFromMe || ev.Info.IsGroup {
+		return
+	}
+	msg := ev.Message
+	if msg == nil || ev.Info.Sender.IsEmpty() {
+		return
+	}
+	phone := ev.Info.Sender.ToNonAD().User
+	if alt := ev.Info.SenderAlt.ToNonAD().User; alt != "" {
+		phone = alt
+	}
+	if phone == "" {
+		b.log.Printf("DEBUG msg %s sin phone (sender=%s senderAlt=%s chat=%s)",
+			ev.Info.ID, ev.Info.Sender.String(), ev.Info.SenderAlt.String(), ev.Info.Chat.String())
+		return
+	}
+	b.log.Printf("DEBUG msg %s phone=%s sender=%s senderAlt=%s chat=%s",
+		ev.Info.ID, phone, ev.Info.Sender.String(), ev.Info.SenderAlt.String(), ev.Info.Chat.String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	_ = b.client.MarkRead(ctx, []types.MessageID{ev.Info.ID}, ev.Info.Timestamp, ev.Info.Chat, ev.Info.Sender)
+
+	emp, err := empleados.LookupByPhone(ctx, b.supa, phone)
+	if err != nil {
+		b.log.Printf("Error buscando empleado %s: %v", phone, err)
+		return
+	}
+	if emp == nil {
+		b.log.Printf("DEBUG %s no es empleado activo (telefono=%s)", phone, phone)
+		return
+	}
+
+	text := messageText(msg)
+	if msg.GetAudioMessage() != nil {
+		if b.llmClient == nil {
+			return
+		}
+		audio, derr := b.client.Download(ctx, msg.GetAudioMessage())
+		if derr != nil {
+			b.log.Printf("Descargando audio de %s: %v", phone, derr)
+			return
+		}
+		tr, terr := b.llmClient.Transcribe(ctx, os.Getenv("TRANSCRIBE_MODEL"), audio, "ogg")
+		if terr != nil {
+			b.log.Printf("Transcribiendo audio de %s: %v", phone, terr)
+			return
+		}
+		text = strings.TrimSpace(tr)
+		if text == "" {
+			return
+		}
+	}
+	if text == "" {
+		return
+	}
+
+	_ = b.history.Append(ctx, phone, "user", text)
+
+	if b.flows.handleCommand(phone, emp, text) {
+		return
+	}
+	flowActive := b.flows.active(ctx, phone)
+	// Selección pendiente de ficha (solo cuando no hay flujo /cotizar activo).
+	if !flowActive && b.handleFichaPick(ctx, ev.Info.Chat, phone, emp, text) {
+		return
+	}
+	if flowActive {
+		err := b.flows.process(ctx, phone, emp, text)
+		if err == errNeedsAssistant {
+			// Interrupción del flujo: primero el router determinista (ficha,
+			// imprimir, catálogo, listar); si no es negocio, conversación.
+			if b.handleRouterIntent(ctx, ev.Info.Chat, phone, emp, text) {
+				return
+			}
+			if b.llmClient == nil {
+				b.sendText(ev.Info.Chat, "Comandos: /cotizar, /listar, /cancelar.")
+				return
+			}
+			b.runAssistantV2(ctx, ev.Info.Chat, phone, emp, text, b.flows.stepHint(ctx, phone))
+			return
+		}
+		if err != nil && err != errNoFlow {
+			b.log.Printf("Flujo %s: %v", phone, err)
+		}
+		return
+	}
+	if b.handleRouterIntent(ctx, ev.Info.Chat, phone, emp, text) {
+		return
+	}
+	if b.llmClient == nil {
+		b.sendText(ev.Info.Chat, "Hola "+firstWord(emp.NombreCompleto)+", actualmente estoy en mantenimiento. Comandos: /cotizar, /listar, /cancelar.")
+		return
+	}
+	b.runAssistantV2(ctx, ev.Info.Chat, phone, emp, text, "")
+}
+
+// runAssistantV2 usa el LLM solo para conversación: el router determinista ya
+// se encarga de ficha, catálogo, imprimir y listar (sin tools de negocio).
+func (b *Bot) runAssistantV2(ctx context.Context, chat types.JID, phone string, emp *empleados.Empleado, text string, flowHint string) {
+	hist, err := b.history.Recent(ctx, phone, 40)
+	if err != nil {
+		hist = nil
+	}
+	if len(hist) == 0 {
+		b.sendText(chat, greetingFor(emp))
+	}
+
+	messages := []llm.Message{
+		{Role: "system", Content: buildConversationPrompt()},
+	}
+	if flowHint != "" {
+		messages = append(messages, llm.Message{Role: "system", Content: flowHint})
+	}
+	for _, h := range hist {
+		messages = append(messages, llm.Message{Role: h.Role, Content: h.Content})
+	}
+	messages = append(messages, llm.Message{Role: "user", Content: text})
+
+	llmCtx, llmCancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer llmCancel()
+	resp, err := b.llmClient.Chat(llmCtx, messages, nil)
+	if err != nil {
+		b.log.Printf("LLM %s: %v", phone, err)
+		b.sendText(chat, "Estoy teniendo problemas de conexión con el asistente. Intenta de nuevo en un momento.")
+		return
+	}
+	if resp.Content != "" {
+		b.sendText(chat, resp.Content)
+	}
+}
+
+// buildConversationPrompt arma el prompt del asistente v2: solo conversación y
+// aclaraciones, sin tools de negocio (el router determinista las maneja).
+func buildConversationPrompt() string {
+	return "Eres el asistente de WhatsApp de Capital Motors (concesionario DONGFENG). " +
+		"El empleado que te escribe es un asesor comercial ya identificado. " +
+		"Respondes en español, con mensajes cortos y amables. " +
+		"El bot maneja automáticamente las cotizaciones, las fichas/fotos de " +
+		"vehículos, el catálogo de precios, el listado de cotizaciones y la " +
+		"impresión de documentos: no intentes hacerlos tú ni inventes precios ni " +
+		"vehículos. Si el usuario pregunta algo que depende de esos datos, dile " +
+		"que ya se está procesando o guíalo con el comando /cotizar. Si no sabes " +
+		"algo, sé honesto y sugiere hablar con un supervisor."
 }
 
 // messageText extrae el texto plano de un mensaje.

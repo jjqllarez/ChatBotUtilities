@@ -281,7 +281,7 @@ func (b *Bot) toolListar(ctx context.Context, chat types.JID, emp *empleados.Emp
 			continue
 		}
 		n++
-		nombre := strings.TrimSpace(v.ModeloNombre + " " + v.NombreVersion)
+		nombre := displayName(v)
 		if v.ModeloNombre == "" {
 			nombre = v.NombreVersion
 		}

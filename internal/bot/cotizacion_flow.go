@@ -106,7 +106,7 @@ func (f *flowManager) stepHint(ctx context.Context, phone string) string {
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso VEHÍCULO. Si su mensaje no es un número de vehículo, atiéndelo muy breve y al final recuérdale que escriba el número del vehículo que quiera (1-" + itoa(len(s.Versions)) + ")."
 	case stepPrecio:
 		v := s.Version
-		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso TIPO DE PRECIO para " + v.MarcaNombre + " " + v.ModeloNombre + " " + v.NombreVersion + ". Si su mensaje no responde a eso, atiéndelo muy breve y al final recuérdale que escriba 1 (Estandar), 2 (Premium) o 3 (Flota)."
+		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso TIPO DE PRECIO para " + v.MarcaNombre + " " + displayName(*v) + ". Si su mensaje no responde a eso, atiéndelo muy breve y al final recuérdale que escriba 1 (Estandar), 2 (Premium) o 3 (Flota)."
 	case stepPlan:
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso PLAN DE FINANCIAMIENTO (Crédito). Si su mensaje no es un número de plan, atiéndelo muy breve y al final recuérdale que escriba el número del plan."
 	case stepInicial:
@@ -203,6 +203,7 @@ const mensajeAyuda = "Comandos disponibles:\n" +
 func (f *flowManager) start(phone string, emp *empleados.Empleado) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	f.bot.clearStateKey(ctx, phone, "ficha_pick")
 
 	versions, err := cotizaciones.ObtenerVersiones(ctx, f.supa, emp.SocioComercial)
 	if err != nil {
@@ -286,7 +287,7 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		s.Version = &v
 		s.Step = stepPrecio
 		f.bot.sendText(jidFor(phone),
-			"¿Tipo de precio para "+v.MarcaNombre+" "+v.ModeloNombre+" "+v.NombreVersion+"?\n"+
+			"¿Tipo de precio para "+v.MarcaNombre+" "+displayName(v)+"?\n"+
 				"1) Estandar ("+formatQ(v.PrecioEstandar)+")\n"+
 				"2) Premium ("+formatQ(v.PrecioPremium)+")\n"+
 				"3) Flota ("+formatQ(v.PrecioFlota)+")")
@@ -511,7 +512,7 @@ func (f *flowManager) askVehiculo(phone string, s *quoteDraft) {
 	var b strings.Builder
 	b.WriteString("Elige el vehículo (escribe el número):\n")
 	for i, v := range s.Versions {
-		fmt.Fprintf(&b, "%d) %s %s %s\n", i+1, v.MarcaNombre, v.ModeloNombre, v.NombreVersion)
+		fmt.Fprintf(&b, "%d) %s %s\n", i+1, v.MarcaNombre, displayName(v))
 	}
 	f.bot.sendText(jidFor(phone), strings.TrimRight(b.String(), "\n"))
 }
@@ -541,7 +542,7 @@ func (f *flowManager) askConfirmar(phone string, s *quoteDraft) {
 	s.Step = stepConfirmar
 	var b strings.Builder
 	b.WriteString("Confirma los datos:\n")
-	fmt.Fprintf(&b, "Vehículo: %s %s %s\n", s.Version.MarcaNombre, s.Version.ModeloNombre, s.Version.NombreVersion)
+	fmt.Fprintf(&b, "Vehículo: %s %s\n", s.Version.MarcaNombre, displayName(*s.Version))
 	fmt.Fprintf(&b, "Precio (%s): %s USD\n", s.TipoPrecio, formatQ(s.Version.PrecioPorTipo(s.TipoPrecio)))
 	if s.Plan != nil {
 		fmt.Fprintf(&b, "Plan: %s\nInicial: %s USD\n", s.Plan.NombrePlan, formatQ(s.Inicial))
@@ -655,6 +656,11 @@ func (f *flowManager) listadoCotizaciones(ctx context.Context, phone string, emp
 	f.mu.Lock()
 	f.lastList[phone] = list
 	f.mu.Unlock()
+	if data, err := json.Marshal(list); err == nil {
+		st, _ := f.bot.state.Get(ctx, phone)
+		st["last_list"] = string(data)
+		_ = f.bot.state.Set(ctx, phone, st)
+	}
 	return list, nil
 }
 
@@ -670,11 +676,35 @@ func (f *flowManager) pickCotizacion(phone string, indice int) (cotizaciones.Cot
 	return list[indice-1], true
 }
 
+// restoreLastList recupera el último listado persistido en Supabase
+// (bot_chat_state["last_list"]) para poder imprimir tras un reinicio.
+func (f *flowManager) restoreLastList(ctx context.Context, phone string) {
+	st, err := f.bot.state.Get(ctx, phone)
+	if err != nil {
+		return
+	}
+	raw, _ := st["last_list"].(string)
+	if raw == "" {
+		return
+	}
+	var list []cotizaciones.CotizacionBreve
+	if json.Unmarshal([]byte(raw), &list) != nil || len(list) == 0 {
+		return
+	}
+	f.mu.Lock()
+	f.lastList[phone] = list
+	f.mu.Unlock()
+}
+
 // resolverCotizacion localiza la cotización del listado por índice (1-based).
 // Primero usa la lista en memoria; si no (p. ej. tras reinicio), recupera el
 // último listado persistido en Supabase (bot_chat_history) y reconsulta para
 // obtener el ID.
 func (f *flowManager) resolverCotizacion(ctx context.Context, phone string, emp *empleados.Empleado, indice int) (cotizaciones.CotizacionBreve, bool) {
+	if c, ok := f.pickCotizacion(phone, indice); ok {
+		return c, true
+	}
+	f.restoreLastList(ctx, phone)
 	if c, ok := f.pickCotizacion(phone, indice); ok {
 		return c, true
 	}
