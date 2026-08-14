@@ -34,6 +34,7 @@ const (
 	stepPickCliente = "pick_cliente"
 	stepConfirmar = "confirmar"
 	stepClienteCedula = "cliente_cedula"
+	stepClienteNombre = "cliente_nombre"
 )
 
 // draftTTL es el tiempo de inactividad tras el cual un borrador de /cotizar
@@ -125,6 +126,8 @@ func (f *flowManager) stepHint(ctx context.Context, phone string) string {
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO y debe ELEGIR UN CLIENTE de la lista. Si su mensaje no es un número, atiéndelo muy breve y al final recuérdale que escriba el número del cliente correcto."
 	case stepClienteCedula:
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso CÉDULA del cliente nuevo. Si su mensaje no es una cédula, atiéndelo muy breve y al final recuérdale que escriba la cédula con su letra (ej: V-12345678)."
+	case stepClienteNombre:
+		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO y debe escribir el NOMBRE del cliente nuevo (la cédula ya está capturada). Si su mensaje no es un nombre, atiéndelo muy breve y recuérdale que escriba el nombre."
 	case stepConfirmar:
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso CONFIRMAR. Si su mensaje no es si/no, atiéndelo muy breve y al final recuérdale que responda 'si' para confirmar o 'no' para cancelar."
 	}
@@ -458,6 +461,14 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 							"Escribe la cédula de "+p.NombreRazonSocial+" (ej: V-12345678).")
 						return nil
 					}
+					if p.NombreRazonSocial == "" {
+						// Solo vino la cédula: pedir el nombre antes de registrar.
+						s.ClienteNuevo = p
+						s.Step = stepClienteNombre
+						f.bot.sendText(jidFor(phone),
+							"Dime el nombre del cliente (cédula "+p.TipoDocumento+"-"+p.NumeroDocumento+"):")
+						return nil
+					}
 					id, err := cotizaciones.CrearCliente(ctx, f.supa, emp.SocioComercial, *p)
 					if err != nil {
 						f.bot.sendText(jidFor(phone), "No pude registrar el cliente: "+err.Error())
@@ -518,6 +529,35 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		p := s.ClienteNuevo
 		p.TipoDocumento = tipoDoc
 		p.NumeroDocumento = doc
+		id, err := cotizaciones.CrearCliente(ctx, f.supa, emp.SocioComercial, *p)
+		if err != nil {
+			f.bot.sendText(jidFor(phone), "No pude registrar el cliente: "+err.Error())
+			return nil
+		}
+		s.Cliente = &cotizaciones.Cliente{
+			ID:                id,
+			SocioComercial:    emp.SocioComercial,
+			TipoDocumento:     p.TipoDocumento,
+			NumeroDocumento:   p.NumeroDocumento,
+			NombreRazonSocial: p.NombreRazonSocial,
+			TelefonoPrincipal: p.TelefonoPrincipal,
+		}
+		s.ClienteNuevo = nil
+		f.askConfirmar(phone, s)
+	case stepClienteNombre:
+		if s.ClienteNuevo == nil {
+			return errNeedsAssistant
+		}
+		p := s.ClienteNuevo
+		name := strings.TrimSpace(text)
+		if m := reClienteDoc.FindString(name); m != "" {
+			name = strings.TrimSpace(strings.Replace(name, m, "", 1))
+		}
+		if name == "" {
+			f.bot.sendText(jidFor(phone), "Escribe el nombre del cliente.")
+			return nil
+		}
+		p.NombreRazonSocial = name
 		id, err := cotizaciones.CrearCliente(ctx, f.supa, emp.SocioComercial, *p)
 		if err != nil {
 			f.bot.sendText(jidFor(phone), "No pude registrar el cliente: "+err.Error())
@@ -971,11 +1011,14 @@ func parseNuevoCliente(text string) (*cotizaciones.CrearClienteParams, bool) {
 		tipoDoc = strings.ToUpper(m[:1])
 		doc = strings.TrimLeft(strings.TrimSpace(m[1:]), "- ")
 	}
-	nombre := strings.TrimSpace(strings.Join(strings.Fields(reNoLetras.ReplaceAllString(term, " ")), " "))
-	if nombre == "" {
-		return nil, false
+	// Quitar el token de cédula antes de extraer el nombre (evita que la
+	// letra del tipo de documento "V..." quede registrada como nombre).
+	cleanTerm := term
+	if m := reClienteDoc.FindString(term); m != "" {
+		cleanTerm = strings.Replace(term, m, " ", 1)
 	}
-	if doc == "" && phone == "" {
+	nombre := strings.TrimSpace(strings.Join(strings.Fields(reNoLetras.ReplaceAllString(cleanTerm, " ")), " "))
+	if doc == "" && nombre == "" {
 		return nil, false
 	}
 	// Si no hay cédula, no usar el teléfono como documento: el flujo pedirá
