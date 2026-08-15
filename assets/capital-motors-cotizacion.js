@@ -9,7 +9,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
       'cliente-nombre', 'cliente-ci', 'cliente-email', 'cliente-telefono', 'cliente-vendedor',
       'socio-comercial', // Datos de la empresa
       'logo', 'numero-presupuesto', 'forma-pago', 'fecha-emision',
-      'imagen-auto', 'datos-vehiculo', 'bloques', 'condiciones'
+      'imagen-auto', 'datos-vehiculo', 'bloques', 'tablas', 'condiciones'
     ];
   }
 
@@ -25,6 +25,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
     this._imagenAuto = '';
     this._datosVehiculo = {};
     this._bloques = [];
+    this._tablas = [];
     this._condiciones = '';
   }
 
@@ -64,6 +65,14 @@ class CapitalMotorsCotizacion extends HTMLElement {
     this.setAttribute('bloques', JSON.stringify(this._bloques));
   }
 
+  set tablas(val) {
+    if (typeof val === 'string') {
+      try { val = JSON.parse(val); } catch(e) { val = []; }
+    }
+    this._tablas = Array.isArray(val) ? val : [];
+    this.setAttribute('tablas', JSON.stringify(this._tablas));
+  }
+
   attributeChangedCallback(name, oldValue, newValue) {
     switch (name) {
       case 'cliente-nombre': this._cliente.nombre = newValue || ''; break;
@@ -86,6 +95,10 @@ class CapitalMotorsCotizacion extends HTMLElement {
       case 'bloques':
         try { this._bloques = JSON.parse(newValue); } catch(e) { this._bloques = []; }
         if (!Array.isArray(this._bloques)) this._bloques = [];
+        break;
+      case 'tablas':
+        try { this._tablas = JSON.parse(newValue); } catch(e) { this._tablas = []; }
+        if (!Array.isArray(this._tablas)) this._tablas = [];
         break;
     }
     this.render();
@@ -129,8 +142,6 @@ class CapitalMotorsCotizacion extends HTMLElement {
     let bloquesHTML = '';
     if (this._bloques && this._bloques.length > 0) {
       for (const bloque of this._bloques) {
-        // El punto final del título es el marcador interno del "bloque resumen":
-        // no se imprime en la hoja (p.ej. "Datos." se muestra como "Datos")
         const nombre = (bloque.nombre || 'Bloque').replace(/\.+$/g, '').trim() || 'Bloque';
         const lineas = Array.isArray(bloque.lineas) ? bloque.lineas : [];
         let lineasHTML = lineas.length > 0 
@@ -139,6 +150,35 @@ class CapitalMotorsCotizacion extends HTMLElement {
         bloquesHTML += `
           <div class="section-header">${nombre}</div>
           <div class="info-box">${lineasHTML}</div>
+        `;
+      }
+    }
+
+    let tablasHTML = '';
+    if (this._tablas && this._tablas.length > 0) {
+      for (const tabla of this._tablas) {
+        const nombre = (tabla.nombre || 'Tabla').replace(/\.+$/g, '').trim() || 'Tabla';
+        const columnas = Array.isArray(tabla.columnas) ? tabla.columnas : [];
+        const filas = Array.isArray(tabla.filas) ? tabla.filas : [];
+
+        let thsHTML = columnas.map(col => `<th>${col}</th>`).join('');
+        let trsHTML = filas.map(fila => {
+          let tdsHTML = (Array.isArray(fila) ? fila : []).map(celda => `<td>${celda || ''}</td>`).join('');
+          return `<tr>${tdsHTML}</tr>`;
+        }).join('');
+
+        tablasHTML += `
+          <div class="section-header">${nombre}</div>
+          <div class="table-container">
+            <table class="cotizacion-tabla">
+              <thead>
+                <tr>${thsHTML}</tr>
+              </thead>
+              <tbody>
+                ${trsHTML}
+              </tbody>
+            </table>
+          </div>
         `;
       }
     }
@@ -161,13 +201,21 @@ class CapitalMotorsCotizacion extends HTMLElement {
       .vehiculo-img img { max-width: 100%; max-height: 100%; object-fit: contain; }
       .info-box { border: 1px solid #999; padding: 6px; margin: 6px 0; font-size: 10.5px; }
       .info-box div { margin-bottom: 2px; }
+      
+      /* Estilos para Tablas */
+      .table-container { margin: 6px 0; border: 1px solid #999; overflow-x: auto; }
+      .cotizacion-tabla { width: 100%; border-collapse: collapse; font-size: 10px; }
+      .cotizacion-tabla th { background-color: #f1f5f9; font-weight: bold; border: 1px solid #999; padding: 4px 6px; text-align: left; }
+      .cotizacion-tabla td { border: 1px solid #999; padding: 4px 6px; text-align: left; }
+      .cotizacion-tabla tr:nth-child(even) { background-color: #f8fafc; }
+
       .conditions-box { position: absolute; left: 1cm; right: 1cm; bottom: 3.2cm; font-size: 9px; margin: 0; text-align: justify; border-top: 1px dashed #003366; padding-top: 6px; max-height: 4.4cm; overflow: hidden; }
       .conditions-box p { margin: 0; font-weight: bold; }
       .footer-signs { position: absolute; left: 1cm; right: 1cm; bottom: 1cm; display: flex; justify-content: space-between; margin: 0; }
       .sign { border-top: 1px solid #000; width: 240px; text-align: center; padding-top: 4px; font-size: 10px; }
-      .section-header, .info-box, .cliente-box, .vehiculo-img, .conditions-box, .footer-signs { page-break-inside: avoid; }
+      .section-header, .info-box, .cliente-box, .vehiculo-img, .conditions-box, .footer-signs, .table-container { page-break-inside: avoid; }
       @media screen { :host { background: #e9ecef; padding: 20px 0; } .page { box-shadow: 0 5px 15px rgba(0,0,0,0.1); } }
-      @media print { :host { background: none; padding: 0; } .page { margin: 0; box-shadow: none; background: none; } }
+      @media print { :host { background: none; padding: 0; } .page { margin: 0; shadow: none; background: none; } }
     `;
 
     // TEMPLATE CON DATOS DINÁMICOS DEL SOCIO COMERCIAL
@@ -203,6 +251,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
           <div class="section-header">DATOS DEL VEHICULO</div>
           <div class="info-box">${vehiculoHTML}</div>
           ${bloquesHTML}
+          ${tablasHTML}
         </div>
         <div class="conditions-box">
           <p>Planchart Global, C.A. es el Distribuidor Maestro Oficial de DONGFENG en Venezuela. Capital Motors forma parte de la red autorizada de concesionarios afiliados para comercialización, entrega y servicio postventa de la marca.</p>
@@ -236,10 +285,6 @@ class CapitalMotorsCotizacion extends HTMLElement {
     }
   }
 
-  // Escala la hoja para que SIEMPRE quepa y quede centrada en el contenedor
-  // visible del modal, sea cual sea el ancho de pantalla. El contenedor puede
-  // ser #modalCotizacionContent (nueva-cotizacion/listar) o #impWcWrap
-  // (editar-json / CotizacionImpresion.astro).
   _ajustarEscalaAncho() {
     const page = this.shadowRoot.querySelector('#pageContainer');
     if (!page) return;
