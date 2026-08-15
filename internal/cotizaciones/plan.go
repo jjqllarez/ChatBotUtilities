@@ -23,6 +23,7 @@ type Plan struct {
 type ResultadoMotor struct {
 	Tokens         json.RawMessage   `json:"tokens"`
 	Bloques        []json.RawMessage `json:"bloques"`
+	Tablas         []json.RawMessage `json:"tablas"`
 	OrdenEjecucion []string          `json:"orden_ejecucion"`
 }
 
