@@ -51,6 +51,7 @@ type PlanDetalle struct {
 	NombrePlan string `json:"nombre_plan"`
 	Resultado  struct {
 		Bloques []Bloque `json:"bloques"`
+		Tablas  []Tabla  `json:"tablas"`
 	} `json:"resultado_motor"`
 }
 
@@ -58,6 +59,12 @@ type Bloque struct {
 	Nombre        string   `json:"nombre"`
 	TextoCompleto string   `json:"texto_completo"`
 	Lineas        []string `json:"lineas"`
+}
+
+type Tabla struct {
+	Nombre   string     `json:"nombre"`
+	Columnas []string   `json:"columnas"`
+	Filas    [][]string `json:"filas"`
 }
 
 // ObtenerDetalle estructurado de una cotización guardada.

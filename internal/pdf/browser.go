@@ -124,11 +124,13 @@ func buildHTML(d *cotizaciones.Detalle) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("leyendo web component: %w", err)
 	}
-	// Logo del componente es "/dongfeng.png" (hardcodeado): lo reemplazamos por
-	// un data URI para que funcione desde file:// sin servir el asset.
+	// El componente usa logo_url del socio comercial con fallback a
+	// "/dongfeng.png" (hardcodeado): reemplazamos ese fallback por un data URI
+	// para que funcione desde file:// sin servir el asset.
 	if png, err := os.ReadFile(assetPath("dongfeng.png")); err == nil {
 		dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 		comp = bytes.ReplaceAll(comp, []byte(`"/dongfeng.png"`), []byte(`"`+dataURI+`"`))
+		comp = bytes.ReplaceAll(comp, []byte(`'/dongfeng.png'`), []byte(`'`+dataURI+`'`))
 	}
 
 	datos, err := json.Marshal(componentData(d))
@@ -160,6 +162,7 @@ func buildHTML(d *cotizaciones.Detalle) (string, error) {
     wc.imagenAuto = data.imagen_auto;
     wc.datosVehiculo = data.datos_vehiculo;
     wc.bloques = data.bloques;
+    wc.tablas = data.tablas;
     window.__renderReady = true;
   })();
 </script>
@@ -183,8 +186,10 @@ func componentData(d *cotizaciones.Detalle) map[string]any {
 	}
 
 	var bloques []cotizaciones.Bloque
+	var tablas []cotizaciones.Tabla
 	if det.Plan.ID != 0 {
 		bloques = det.Plan.Resultado.Bloques
+		tablas = det.Plan.Resultado.Tablas
 	}
 
 	return map[string]any{
@@ -204,6 +209,7 @@ func componentData(d *cotizaciones.Detalle) map[string]any {
 			"Personalización": per,
 		},
 		"bloques": bloques,
+		"tablas":  tablas,
 	}
 }
 
