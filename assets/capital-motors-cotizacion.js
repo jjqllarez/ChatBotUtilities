@@ -140,8 +140,14 @@ class CapitalMotorsCotizacion extends HTMLElement {
     }
 
     let bloquesHTML = '';
-    if (this._bloques && this._bloques.length > 0) {
-      for (const bloque of this._bloques) {
+    const elementosLayout = [
+      ...(this._bloques || []).map(b => ({ type: 'bloque', data: b })),
+      ...(this._tablas || []).map(t => ({ type: 'tabla', data: t }))
+    ].sort((a, b) => (a.data.orden ?? 0) - (b.data.orden ?? 0));
+
+    elementosLayout.forEach(el => {
+      if (el.type === 'bloque') {
+        const bloque = el.data;
         const nombre = (bloque.nombre || 'Bloque').replace(/\.+$/g, '').trim() || 'Bloque';
         const lineas = Array.isArray(bloque.lineas) ? bloque.lineas : [];
         let lineasHTML = lineas.length > 0 
@@ -151,12 +157,8 @@ class CapitalMotorsCotizacion extends HTMLElement {
           <div class="section-header">${nombre}</div>
           <div class="info-box">${lineasHTML}</div>
         `;
-      }
-    }
-
-    let tablasHTML = '';
-    if (this._tablas && this._tablas.length > 0) {
-      for (const tabla of this._tablas) {
+      } else {
+        const tabla = el.data;
         const nombre = (tabla.nombre || 'Tabla').replace(/\.+$/g, '').trim() || 'Tabla';
         const columnas = Array.isArray(tabla.columnas) ? tabla.columnas : [];
         const filas = Array.isArray(tabla.filas) ? tabla.filas : [];
@@ -167,7 +169,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
           return `<tr>${tdsHTML}</tr>`;
         }).join('');
 
-        tablasHTML += `
+        bloquesHTML += `
           <div class="section-header">${nombre}</div>
           <div class="table-container">
             <table class="cotizacion-tabla">
@@ -181,7 +183,7 @@ class CapitalMotorsCotizacion extends HTMLElement {
           </div>
         `;
       }
-    }
+    });
 
     const styles = `
       * { margin:0; padding:0; box-sizing:border-box; }
@@ -251,7 +253,6 @@ class CapitalMotorsCotizacion extends HTMLElement {
           <div class="section-header">DATOS DEL VEHICULO</div>
           <div class="info-box">${vehiculoHTML}</div>
           ${bloquesHTML}
-          ${tablasHTML}
         </div>
         <div class="conditions-box">
           <p>Planchart Global, C.A. es el Distribuidor Maestro Oficial de DONGFENG en Venezuela. Capital Motors forma parte de la red autorizada de concesionarios afiliados para comercialización, entrega y servicio postventa de la marca.</p>

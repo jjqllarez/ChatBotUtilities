@@ -59,12 +59,14 @@ type Bloque struct {
 	Nombre        string   `json:"nombre"`
 	TextoCompleto string   `json:"texto_completo"`
 	Lineas        []string `json:"lineas"`
+	Orden         int      `json:"orden,omitempty"`
 }
 
 type Tabla struct {
 	Nombre   string     `json:"nombre"`
 	Columnas []string   `json:"columnas"`
 	Filas    [][]string `json:"filas"`
+	Orden    int        `json:"orden,omitempty"`
 }
 
 // ObtenerDetalle estructurado de una cotización guardada.
