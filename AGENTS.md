@@ -55,7 +55,42 @@ go/
   internal/bot/assistant.go         # asistente LLM (sin tools en V2) + runAssistantV2
   internal/bot/history.go|state.go  # memoria persistente + estado de conversación (Supabase)
   internal/bot/guards.go            # anti-baneo (cola de salida, ritmo, cuota diaria)
+  internal/bot/simmode.go           # modo simulación: bot_config.simulation + ForceSim + SimulateMessage
+  cmd/simchat/main.go               # driver de pruebas SIN WhatsApp (inyecta mensajes en handleMessageV2)
 ```
+
+## Modo simulación y driver de pruebas (`cmd/simchat`)
+
+Dos mecanismos para probar el pipeline real **sin enviar nada por WhatsApp** (cero riesgo de baneo):
+
+1. **Switch en Supabase** (`bot_config.simulation = 'true'/'false'`, tabla creada por la migración
+   `supabase/migrations/20260814000000_bot_config.sql`): con `'true'`, el bot de producción procesa los
+   mensajes reales por el pipeline completo (ruteo, flujos, LLM, Supabase, PDF) pero NO envía por WhatsApp:
+   registra `[SIM] -> <jid>: <texto>` en consola y guarda los adjuntos (card PNG, PDF) en `sim_out/`
+   (carpeta junto al binario, `/opt/whatsbot/sim_out`). El flag se cachea 10 s (`simmode.go`), cambia en
+   caliente y si la lectura falla conserva el último valor conocido. Poner en `'false'` para volver a enviar.
+2. **Driver `cmd/simchat`** (nuevo): proceso aparte que inyecta mensajes directo en `handleMessageV2` del
+   mismo paquete, con Supabase/LLM reales, **sin abrir socket ni usar ningún cliente de WhatsApp**. Es la
+   vía recomendada para que los agentes prueben ruteo/negocio por su cuenta sin molestar al usuario.
+   - Se construye igual que `main.go` (`bot.New` con container Supabase de solo lectura, sin `Run()`:
+     `New()` no conecta whatsmeow; `Connect()` es aparte y nunca se llama).
+   - `b.ForceSim(true)` fuerza sim sin consultar el flag; `b.SimulateMessage(phone, text)` construye un
+     `events.Message` fake (JID, ID `SIM-<nanotime>`, `Conversation`) y lo mete al pipeline.
+   - La salida se drena por el `outWorker` normal → `simEmit` (consola + `sim_out/`).
+   - Blindaje necesario: `handleMessageV2` omite `b.client.MarkRead` si `client == nil` o sim activa, y la
+     ruta de audio requiere `client != nil` (no aplica a texto simulado).
+   - Ejecución en el VPS (el `.env` y `sim_out/` viven en `/opt/whatsbot` y la carpeta es de `www-data`):
+     ```bash
+     # /tmp/simchat compilado con: go build -o /tmp/simchat ./cmd/simchat
+     sudo -u www-data bash -c 'cd /opt/whatsbot && /tmp/simchat -phone 584248821071 "Catalogo" "8" "1"'
+     ```
+     (las comillas anidadas via plink se rompen; usar un script `sudo /tmp/run_simchat.sh` como wrapper).
+   - Verificado end-to-end (2026-08-14): "Catalogo" → lista completa; "ficha del vehiculo 30" → card PNG en
+     `sim_out/`; flujo `/cotizar 2 17 3 1 50% V-16573081 si` → COT-260814-528 (id 44) con PDF+PNG reales,
+     precio flota 36213.14 e inicial 50% = 18106.57, todo sin tocar WhatsApp.
+   - Nota: en el VPS el módulo Go está en la **raíz** del repo
+     (`/home/adminvps/services/ChatBotUtilities`), no dentro de `go/`. El `go/` del árbol solo existe
+     localmente/en docs; compilar y desplegar es `go build ./... && sudo ./deploy.sh` desde la raíz.
 
 ## Comandos
 
@@ -237,6 +272,18 @@ y corregidas en caliente:
     **PDF + imagen** enviados y leídos. El detalle guardado en Supabase confirma `precio_seleccionado:
     36213.14` (flota), `inicial: 18106.57` (50%), plan ARCA 12 MESES, vendedor JOHNATHAN QUIJADA.
 
+19. **Soporte de Tablas en Planes de Financiamiento** (`internal/cotizaciones/plan.go` y `internal/pdf/browser.go`):
+    la respuesta `resultado_motor` devuelta por la Edge Function `motorjson` al evaluar planes contiene
+    `tokens`, `bloques` y `tablas`. Sin embargo, la struct `ResultadoMotor` en `plan.go` no tenía el campo
+    `Tablas []json.RawMessage `json:"tablas"``. En consecuencia, Go descartaba la clave `tablas` al guardar la
+    cotización en Supabase y las cotizaciones quedaban persistidas sin tablas (`tablas: null`), haciendo que el
+    Web Component `<capital-motors-cotizacion>` no renderizara la sección de tablas en el PDF/imagen.
+    **Fix**:
+    - Se agregó `Tablas []json.RawMessage `json:"tablas"`` a `ResultadoMotor` en `internal/cotizaciones/plan.go`.
+    - Se verificó que `componentData` y `buildHTML` en `internal/pdf/browser.go` inyecten `wc.tablas = data.tablas;`.
+    - Verificado con el driver de simulación (`simchat`): cotización COT-260815-008 (id 56) generó y persistió
+      la tabla "Gastos Adicionales" (Concepto, Monto) con sus 4 filas correctamente en Supabase, PDF e imagen.
+
 
 ## Emisión de cotizaciones (flujo `/cotizar`)
 
@@ -267,13 +314,6 @@ y corregidas en caliente:
   "Consultar") renderizado como PNG. El prefijo de precio se autocorta al tamaño exacto de la card (`trimPNG`).
   Solo se envía cuando el usuario la pide expresamente ("foto del vehículo", "card", "ficha"); NO en el flujo de
   cotización.
-  - **Selección de tipo de precio en el catálogo** (`internal/bot/flow_catalogo.go`): al elegir un vehículo del
-    catálogo ("8", "Id: 24"), el bot NO envía la card de inmediato: pregunta el tipo de precio —
-    `1) Estándar 2) Premium 3) Flota` y, **solo para administradores**, `4) Precio personalizado (teclear el precio)`.
-    La card se renderiza con `sendFicha(..., tipoPrecio, custom)` (usa `PrecioPorTipo` o el monto a medida si es admin).
-    Estados en `bot_chat_state` con prefijo `catalogo_`: `catalogo_active/ids/ts` (catálogo + TTL 30 min),
-    `catalogo_sel` (versión elegida), `catalogo_wait` (esperando tipo de precio), `catalogo_custom` (esperando monto
-    personalizado). `parseTipoPrecio` cubre número o nombre ("estandar", "premium", "flota", "personalizado").
 
 ## Asistente LLM (OpenRouter) — comportamientos clave
 - **Saludo con hora Venezuela**: el primer mensaje de cada chat (sin historial) saluda "Buenos días/tardes/noches +
