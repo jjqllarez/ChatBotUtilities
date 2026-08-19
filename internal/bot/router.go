@@ -29,6 +29,10 @@ const (
 	intentAyudaCotizar
 )
 
+// fichaWaitingKey indica que el usuario está respondiendo a una
+// solicitud de nombre de vehículo para ficha.
+const fichaWaitingKey = "ficha_waiting_term"
+
 // rePickNumber acepta la respuesta de selección de una lista (número suelto o
 // "el 2", "la 2", "numero 2").
 var rePickNumber = regexp.MustCompile(`^(?:(?:el|la|numero|número)\s*)?(\d{1,3})\s*$`)
@@ -162,6 +166,11 @@ func (b *Bot) handleRouterIntent(ctx context.Context, chat types.JID, phone stri
 			return true
 		}
 	}
+	// Si el usuario está respondiendo a una solicitud de nombre de vehículo para ficha
+	if b.getStateBool(ctx, phone, fichaWaitingKey) {
+		return b.handleFicha(ctx, chat, phone, emp, text)
+	}
+
 	intentResult := classifyIntent(text)
 	if intentResult == intentConversacion {
 		flowName := b.preClasificarLLM(ctx, phone, emp, text)
@@ -215,6 +224,7 @@ func (b *Bot) handleFicha(ctx context.Context, chat types.JID, phone string, emp
 	versions, err := cotizaciones.ObtenerVersiones(ctx, b.supa, emp.SocioComercial)
 	if err != nil {
 		b.sendText(chat, "No pude cargar el catálogo. Intenta de nuevo.")
+		b.clearStateKey(ctx, phone, fichaWaitingKey)
 		return true
 	}
 	low := norm(text)
@@ -228,16 +238,23 @@ func (b *Bot) handleFicha(ctx context.Context, chat types.JID, phone string, emp
 					b.sendText(chat, r)
 				}
 				b.clearStateKey(ctx, phone, "ficha_pick")
+			b.clearStateKey(ctx, phone, fichaWaitingKey)
 				return true
 			}
 		}
 		b.sendText(chat, fmt.Sprintf("No encontré la versión %d.", n))
+		b.clearStateKey(ctx, phone, fichaWaitingKey)
 		return true
 	}
 	term := extractTerm(text, fichaMarkers)
 	if term == "" {
-		b.sendText(chat, "¿De qué vehículo quieres la ficha? Ej: 'la ficha del Paladin' o 'ficha del vehiculo' + un número.")
-		return true
+		if b.getStateBool(ctx, phone, fichaWaitingKey) {
+			term = strings.TrimSpace(text)
+		} else {
+			b.setStateBool(ctx, phone, fichaWaitingKey, true)
+			b.sendText(chat, "¿De qué vehículo quieres la ficha? Ej: 'la ficha del Paladin' o 'ficha del vehiculo' + un número.")
+			return true
+		}
 	}
 	// Término puramente numérico: tratar como ID de versión.
 	if n, err := strconv.Atoi(term); err == nil {
@@ -248,10 +265,12 @@ func (b *Bot) handleFicha(ctx context.Context, chat types.JID, phone string, emp
 					b.sendText(chat, r)
 				}
 				b.clearStateKey(ctx, phone, "ficha_pick")
+			b.clearStateKey(ctx, phone, fichaWaitingKey)
 				return true
 			}
 		}
 		b.sendText(chat, fmt.Sprintf("No encontré la versión %d.", n))
+		b.clearStateKey(ctx, phone, fichaWaitingKey)
 		return true
 	}
 	matches := matchVersions(versions, term)
