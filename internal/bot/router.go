@@ -246,6 +246,11 @@ func (b *Bot) handleFicha(ctx context.Context, chat types.JID, phone string, emp
 		b.clearStateKey(ctx, phone, fichaWaitingKey)
 		return true
 	}
+	// Si el texto contiene marcadores de ficha, es una petición nueva
+	// (no una respuesta a la solicitud de nombre). Limpiar estado previo.
+	if reFichaFuerte.MatchString(norm(text)) {
+		b.clearStateKey(ctx, phone, fichaWaitingKey)
+	}
 	term := extractTerm(text, fichaMarkers)
 	if term == "" {
 		if b.getStateBool(ctx, phone, fichaWaitingKey) {
