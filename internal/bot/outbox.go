@@ -23,6 +23,13 @@ func (b *Bot) outWorker() {
 		case m := <-b.out:
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 
+			// Modo simulación: NO enviar nada a WhatsApp, solo registrar.
+			if b.simEnabled() {
+				b.simEmit(m)
+				cancel()
+				continue
+			}
+
 			var sendErr error
 			if quotaErr := b.guard.checkQuota(m.jid.User); quotaErr != nil {
 				sendErr = quotaErr

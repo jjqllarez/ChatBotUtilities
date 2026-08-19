@@ -55,6 +55,8 @@ type Bot struct {
 	qrMu     sync.Mutex
 	latestQR string
 
+	sim simState
+
 	reconnect chan struct{}
 	out       chan outMsg
 	stop      chan struct{}
@@ -375,7 +377,10 @@ func (b *Bot) handleMessageV2(ev *events.Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	_ = b.client.MarkRead(ctx, []types.MessageID{ev.Info.ID}, ev.Info.Timestamp, ev.Info.Chat, ev.Info.Sender)
+	// Marcar leído. En modo simulación (o sin cliente conectado) se omite.
+	if b.client != nil && !b.simEnabled() {
+		_ = b.client.MarkRead(ctx, []types.MessageID{ev.Info.ID}, ev.Info.Timestamp, ev.Info.Chat, ev.Info.Sender)
+	}
 
 	emp, err := empleados.LookupByPhone(ctx, b.supa, phone)
 	if err != nil {
@@ -389,7 +394,7 @@ func (b *Bot) handleMessageV2(ev *events.Message) {
 
 	text := messageText(msg)
 	if msg.GetAudioMessage() != nil {
-		if b.llmClient == nil {
+		if b.llmClient == nil || b.client == nil {
 			return
 		}
 		audio, derr := b.client.Download(ctx, msg.GetAudioMessage())

@@ -17,3 +17,4 @@ supabase/.temp/
 # Binarios sueltos viejos
 bot-debug
 bot-fixed
+sim_out/
