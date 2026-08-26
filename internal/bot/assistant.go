@@ -380,7 +380,8 @@ func (b *Bot) toolCrearCotizacion(ctx context.Context, chat types.JID, phone str
 		if minInicial := precioBase * in.Plan.InicialMinimaPorcentaje / 100; in.Inicial < minInicial {
 			in.Inicial = minInicial
 		}
-		res, perr := cotizaciones.CalcularPlan(ctx, b.supa, in.Plan.ID, precioBase, in.Inicial)
+		vars := buildPlanVars(in.Plan, precioBase, in.Inicial)
+		res, perr := cotizaciones.CalcularPlan(ctx, b.supa, in.Plan.ID, vars)
 		if perr != nil {
 			return "Error calculando el plan: " + perr.Error()
 		}
@@ -593,6 +594,26 @@ func planesStr(plans []cotizaciones.Plan) string {
 func ftoa(v int64) string { return fmt.Sprintf("%d", v) }
 
 func itoa(v int) string { return fmt.Sprintf("%d", v) }
+
+// buildPlanVars construye el map de variables para CalcularPlan a partir del
+// plan, precio_base e inicial (usado por el asistente LLM en órdenes directas).
+func buildPlanVars(plan *cotizaciones.Plan, precioBase, inicial float64) map[string]float64 {
+	vars := make(map[string]float64)
+	tokens := cotizaciones.EditableTokens(plan)
+	for _, t := range tokens {
+		switch t.Token {
+		case "precio_base":
+			vars["precio_base"] = precioBase
+		case "inicial":
+			vars["inicial"] = inicial
+		default:
+			if t.Valor > 0 {
+				vars[t.Token] = t.Valor
+			}
+		}
+	}
+	return vars
+}
 
 func min(a, b int) int {
 	if a < b {

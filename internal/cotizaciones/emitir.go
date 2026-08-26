@@ -13,16 +13,22 @@ type EmitirInput struct {
 	UserID            string
 	ClienteID         int64
 	Version           Version
-	TipoPrecio        string // premium | flota | estandar
-	FormaPago         string // Contado | Credito
+	TipoPrecio        string  // premium | flota | estandar | manual
+	CustomPrecio      float64 // precio manual del admin (0 = usar lista)
+	FormaPago         string  // Contado | Credito
 	Inicial           float64
 	NumeroPresupuesto string
 	Plan              *Plan
 	Resultado         *ResultadoMotor
 }
 
-// PrecioVenta es el precio según el tipo elegido.
-func (in EmitirInput) Precio() float64 { return in.Version.PrecioPorTipo(in.TipoPrecio) }
+// Precio devuelve el precio de la cotización: manual si se definió, o el de lista.
+func (in EmitirInput) Precio() float64 {
+	if in.CustomPrecio > 0 {
+		return in.CustomPrecio
+	}
+	return in.Version.PrecioPorTipo(in.TipoPrecio)
+}
 
 // buildDetalle arma el JSONB detalle_cotizacion (igual estructura que la web).
 func (in EmitirInput) buildDetalle() map[string]any {

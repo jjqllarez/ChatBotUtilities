@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,46 +21,66 @@ import (
 )
 
 var (
-	errNoFlow          = errors.New("sin flujo activo")
-	errNeedsAssistant  = errors.New("el mensaje no pertenece al flujo; delegar al asistente")
+	errNoFlow         = errors.New("sin flujo activo")
+	errNeedsAssistant = errors.New("el mensaje no pertenece al flujo; delegar al asistente")
 )
 
 const (
-	stepFormaPago = "forma_pago"
-	stepVehiculo  = "vehiculo"
-	stepPrecio    = "precio"
-	stepPlan      = "plan"
-	stepInicial   = "inicial"
-	stepCliente   = "cliente"
-	stepPickCliente = "pick_cliente"
-	stepConfirmar = "confirmar"
+	stepFormaPago     = "forma_pago"
+	stepVehiculo      = "vehiculo"
+	stepPrecio        = "precio"
+	stepPlan          = "plan"
+	stepVariables     = "variables"
+	stepCliente       = "cliente"
+	stepPickCliente   = "pick_cliente"
+	stepConfirmar     = "confirmar"
 	stepClienteCedula = "cliente_cedula"
 	stepClienteNombre = "cliente_nombre"
+	stepPrecioManual  = "precio_manual"
 )
 
 // draftTTL es el tiempo de inactividad tras el cual un borrador de /cotizar
 // se descarta (evita que un flujo abandonado capture mensajes posteriores).
 const draftTTL = 60 * time.Minute
 
+// varEdit representa una variable editable mostrada al usuario.
+type varEdit struct {
+	Token   string  // ID del token (ej: "seguro")
+	Nombre  string  // Nombre legible
+	Valor   float64 // Valor actual (default o editado)
+	Formato string  // "Moneda", "Porcentaje", "Entero", "Crudo"
+}
+
 // quoteDraft guarda el avance del flujo /cotizar de un chat.
 type quoteDraft struct {
-	Step       string                 `json:"step"`
-	FormaPago  string                 `json:"forma_pago"`
-	Versions   []cotizaciones.Version `json:"versions"`
-	Version    *cotizaciones.Version  `json:"version"`
-	TipoPrecio string                 `json:"tipo_precio"`
-	Plans      []cotizaciones.Plan    `json:"plans"`
-	Plan       *cotizaciones.Plan     `json:"plan"`
-	Inicial    float64                `json:"inicial"`
+	Step       string                      `json:"step"`
+	FormaPago  string                      `json:"forma_pago"`
+	Versions   []cotizaciones.Version      `json:"versions"`
+	Version    *cotizaciones.Version       `json:"version"`
+	TipoPrecio string                      `json:"tipo_precio"`
+	CustomPrice float64                    `json:"custom_price,omitempty"`
+	Plans      []cotizaciones.Plan         `json:"plans"`
+	Plan       *cotizaciones.Plan          `json:"plan"`
+	PlanVars   map[string]float64          `json:"plan_vars,omitempty"`
+	VarEdits   []varEdit                   `json:"var_edits,omitempty"`
+	Inicial    float64                     `json:"inicial"`
 	Resultado  *cotizaciones.ResultadoMotor `json:"resultado"`
-	Cliente    *cotizaciones.Cliente  `json:"cliente"`
-	Candidates []cotizaciones.Cliente `json:"candidates"`
-	// ClienteNuevo guarda datos de cliente a medio capturar (p. ej. nombre +
-	// teléfono) mientras el flujo pide la cédula que falta.
+	Cliente    *cotizaciones.Cliente       `json:"cliente"`
+	Candidates []cotizaciones.Cliente      `json:"candidates"`
 	ClienteNuevo *cotizaciones.CrearClienteParams `json:"cliente_nuevo,omitempty"`
-	// SavedAt marca la última persistencia del borrador; loadDraft lo descarta
-	// si lleva más de draftTTL sin actividad.
-	SavedAt time.Time `json:"saved_at,omitempty"`
+	SavedAt    time.Time                  `json:"saved_at,omitempty"`
+}
+
+// effectivePrice devuelve el precio a usar: el manual del admin si se definió,
+// o el precio de lista según el tipo seleccionado.
+func (s *quoteDraft) effectivePrice() float64 {
+	if s.CustomPrice > 0 {
+		return s.CustomPrice
+	}
+	if s.Version != nil {
+		return s.Version.PrecioPorTipo(s.TipoPrecio)
+	}
+	return 0
 }
 
 // flowManager maneja la máquina de estados por teléfono y las órdenes
@@ -100,8 +121,7 @@ func (f *flowManager) ensureSession(ctx context.Context, phone string) *quoteDra
 }
 
 // stepHint describe el paso actual del flujo /cotizar para que el asistente
-// LLM recuerde al empleado cómo continuar cuando interrumpe con otro tema
-// (así no responde con basura ni ignora el flujo en curso).
+// LLM recuerde al empleado cómo continuar cuando interrumpe con otro tema.
 func (f *flowManager) stepHint(ctx context.Context, phone string) string {
 	s := f.ensureSession(ctx, phone)
 	if s == nil {
@@ -117,9 +137,10 @@ func (f *flowManager) stepHint(ctx context.Context, phone string) string {
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso TIPO DE PRECIO para " + v.MarcaNombre + " " + displayName(*v) + ". Si su mensaje no responde a eso, atiéndelo muy breve y al final recuérdale que escriba 1 (Estandar), 2 (Premium) o 3 (Flota)."
 	case stepPlan:
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso PLAN DE FINANCIAMIENTO (Crédito). Si su mensaje no es un número de plan, atiéndelo muy breve y al final recuérdale que escriba el número del plan."
-	case stepInicial:
-		precio := s.Version.PrecioPorTipo(s.TipoPrecio)
-		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso INICIAL del plan " + s.Plan.NombrePlan + " (precio " + formatQ(precio) + " USD). Si su mensaje no responde a eso, atiéndelo muy breve y al final recuérdale que escriba el inicial en USD (ej: 25000) o porcentaje (ej: 50%)."
+	case stepVariables:
+		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso VARIABLES DEL PLAN. Si su mensaje no es un número de variable ni \"siguiente\", atiéndelo muy breve y al final recuérdale que puede editar una variable escribiendo su número, o \"siguiente\" para calcular."
+	case stepPrecioManual:
+		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso PRECIO MANUAL (admin). Si su mensaje no es un precio en USD, atiéndelo muy breve y al final recuérdale que escriba el precio del vehículo en USD (ej: 25000)."
 	case stepCliente:
 		return "IMPORTANTE: el empleado tiene un flujo /cotizar ACTIVO en el paso CLIENTE. Si su mensaje no es una cédula o nombre, atiéndelo muy breve y al final recuérdale que escriba la cédula (V-12345678) o el nombre del cliente."
 	case stepPickCliente:
@@ -174,12 +195,10 @@ func (f *flowManager) loadDraft(ctx context.Context, phone string) *quoteDraft {
 		f.bot.log.Printf("Cargando borrador de %s: %v", phone, err)
 		return nil
 	}
-	// Un borrador sin paso es un estado corrupto/vacío: no resumirlo.
 	if s.Step == "" {
 		f.bot.log.Printf("Borrador de %s sin paso; descartado", phone)
 		return nil
 	}
-	// Borradores viejos sin actividad se descartan (no revivir un flujo muerto).
 	if s.SavedAt.IsZero() || time.Since(s.SavedAt) > draftTTL {
 		f.bot.log.Printf("Borrador de %s expirado (TTL); descartado", phone)
 		return nil
@@ -217,7 +236,7 @@ const mensajeComoCotizar = "Para hacer una cotización:\n" +
 	"2. Elige la forma de pago: 1 (Contado) o 2 (Crédito).\n" +
 	"3. Elige el vehículo escribiendo su número.\n" +
 	"4. Elige el tipo de precio: 1 (Estándar), 2 (Premium) o 3 (Flota).\n" +
-	"5. Si es crédito, elige el plan y el inicial (US$ o %).\n" +
+	"5. Elige el plan y edita las variables si lo necesitas.\n" +
 	"6. Indica la cédula (V-12345678) o el nombre del cliente.\n" +
 	"7. Confirma y te envío la cotización en PDF e imagen.\n\n" +
 	"Si ya sabes lo que quieres, escribe /cotizar y te guío paso a paso."
@@ -232,8 +251,6 @@ func (f *flowManager) start(phone string, emp *empleados.Empleado) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	f.bot.clearStateKey(ctx, phone, "ficha_pick")
-	// Un /cotizar nuevo invalida el listado previo: un número ya no debe
-	// imprimir la cotización N sino elegir la opción del flujo.
 	f.bot.clearStateKey(ctx, phone, "last_list")
 	f.mu.Lock()
 	delete(f.lastList, phone)
@@ -264,8 +281,6 @@ func (f *flowManager) start(phone string, emp *empleados.Empleado) {
 func (f *flowManager) cancel(phone string) {
 	ctx, cancelCtx := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelCtx()
-	// Recargar el borrador persistido: tras un reinicio la sesión en memoria
-	// puede no existir y el /cancelar no debe quedarse mudo.
 	s := f.ensureSession(ctx, phone)
 	f.mu.Lock()
 	delete(f.sessions, phone)
@@ -273,8 +288,6 @@ func (f *flowManager) cancel(phone string) {
 	if s != nil {
 		f.clearDraft(ctx, phone)
 	}
-	// Cancelar también los flujos composables activos (catálogo, cliente):
-	// /cancelar debe dejar todo el estado limpio.
 	for _, nombre := range []string{"catalogo_vehiculos", "registrar_cliente"} {
 		if fl := f.bot.flowRegistry.FindByName(nombre); fl != nil {
 			fl.Cancelar(phone)
@@ -290,7 +303,6 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 	}
 	defer f.saveDraft(ctx, phone)
 
-	// "cancelar" (con o sin /) cancela el flujo desde cualquier paso.
 	lowCmd := strings.ToLower(strings.TrimSpace(text))
 	if lowCmd == "cancelar" || lowCmd == "cancelar la cotizacion" || lowCmd == "cancelar cotizacion" {
 		f.bot.sendText(jidFor(phone), "Cotización cancelada.")
@@ -301,10 +313,6 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		return nil
 	}
 
-	// Ambigüedad: si el mensaje es un número suelto que coincide con el último
-	// listado de cotizaciones mostrado, podría ser "imprimir la cotización N".
-	// start() limpia last_list, así que esto solo ocurre cuando el usuario pidió
-	// la lista con un flujo en curso: ceder al router (que imprimirá).
 	if rePickNumber.MatchString(strings.TrimSpace(text)) {
 		f.mu.Lock()
 		list, hasList := f.lastList[phone]
@@ -326,7 +334,6 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 			s.FormaPago = "Credito"
 			f.askVehiculo(phone, s)
 		default:
-			// Fallback: "la 1", "opción 2", etc.
 			if idx, ok := parseIndex(text); ok && (idx == 1 || idx == 2) {
 				s.FormaPago = "Contado"
 				if idx == 2 {
@@ -335,15 +342,11 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 				f.askVehiculo(phone, s)
 				break
 			}
-			// No es una respuesta del paso: dejar que el asistente atienda
-			// (ficha, catálogo, otra petición) sin perder el borrador.
 			return errNeedsAssistant
 		}
 	case stepVehiculo:
 		idx, ok := parseIndex(text)
 		if !ok || idx < 1 || idx > len(s.Versions) {
-			// Petición de catálogo/precios durante la elección de vehículo:
-			// atender de forma determinista, sin depender del LLM.
 			if esPeticionCatalogo(text) {
 				f.bot.toolListar(ctx, jidFor(phone), emp, "")
 				return nil
@@ -353,13 +356,17 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		v := s.Versions[idx-1]
 		s.Version = &v
 		s.Step = stepPrecio
-		f.bot.sendText(jidFor(phone),
-			"¿Tipo de precio para "+v.MarcaNombre+" "+displayName(v)+"?\n"+
-				"1) Estandar ("+formatQ(v.PrecioEstandar)+")\n"+
-				"2) Premium ("+formatQ(v.PrecioPremium)+")\n"+
-				"3) Flota ("+formatQ(v.PrecioFlota)+")")
+		msg := "¿Tipo de precio para " + v.MarcaNombre + " " + displayName(v) + "?\n" +
+			"1) Estandar (" + formatQ(v.PrecioEstandar) + ")\n" +
+			"2) Premium (" + formatQ(v.PrecioPremium) + ")\n" +
+			"3) Flota (" + formatQ(v.PrecioFlota) + ")"
+		if f.bot.isAdmin(ctx, emp) {
+			msg += "\n4) Precio manual"
+		}
+		f.bot.sendText(jidFor(phone), msg)
 	case stepPrecio:
 		var precioOK bool
+		var precioManual bool
 		switch strings.ToLower(strings.TrimSpace(text)) {
 		case "1", "estandar", "estándar", "standard":
 			s.TipoPrecio = "estandar"
@@ -370,9 +377,10 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		case "3", "flota":
 			s.TipoPrecio = "flota"
 			precioOK = true
+		case "4", "manual":
+			precioManual = true
 		}
-		// Fallback: textos tipo "el 3", "opción 2" → mapear el número.
-		if !precioOK {
+		if !precioOK && !precioManual {
 			if idx, ok := parseIndex(text); ok {
 				switch idx {
 				case 1:
@@ -384,15 +392,56 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 				case 3:
 					s.TipoPrecio = "flota"
 					precioOK = true
+				case 4:
+					precioManual = true
 				}
 			}
+		}
+		if precioManual {
+			s.Step = stepPrecioManual
+			f.bot.sendText(jidFor(phone),
+				"Escribe el precio del vehículo en USD.\nEjemplo: *\"25000\"* o *\"25.500,00\"*")
+			return nil
 		}
 		if !precioOK {
 			return errNeedsAssistant
 		}
 		if s.FormaPago == "Contado" {
-			s.Plan = nil
-			f.askCliente(phone, s)
+			planContado := cotizaciones.ObtenerPlan(s.Plans, cotizaciones.PlanContadoID)
+			if planContado != nil {
+				s.Plan = planContado
+				f.initPlanVars(s)
+			} else {
+				s.Plan = nil
+			}
+			f.showVarList(phone, s)
+		} else {
+			s.Step = stepPlan
+			f.askPlan(phone, s)
+		}
+	case stepPrecioManual:
+		clean := strings.ReplaceAll(strings.TrimSpace(text), ",", "")
+		clean = strings.ReplaceAll(clean, "$", "")
+		clean = strings.ReplaceAll(clean, " ", "")
+		clean = strings.ReplaceAll(clean, "USD", "")
+		clean = strings.ReplaceAll(clean, "usd", "")
+		var precio float64
+		if _, err := fmt.Sscanf(clean, "%f", &precio); err != nil || precio <= 0 {
+			f.bot.sendText(jidFor(phone),
+				"Precio no válido. Escribe un número mayor a 0.\nEjemplo: *\"25000\"* o *\"25.500,00\"*")
+			return nil
+		}
+		s.CustomPrice = precio
+		s.TipoPrecio = "manual"
+		if s.FormaPago == "Contado" {
+			planContado := cotizaciones.ObtenerPlan(s.Plans, cotizaciones.PlanContadoID)
+			if planContado != nil {
+				s.Plan = planContado
+				f.initPlanVars(s)
+			} else {
+				s.Plan = nil
+			}
+			f.showVarList(phone, s)
 		} else {
 			s.Step = stepPlan
 			f.askPlan(phone, s)
@@ -404,37 +453,38 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		}
 		p := s.Plans[idx-1]
 		s.Plan = &p
-		s.Step = stepInicial
-		f.bot.sendText(jidFor(phone), fmt.Sprintf(
-			"¿Cuánto será el inicial? (ej: 25000 o 50%%)\nEl mínimo del plan %s es %.2f%% del precio.",
-			p.NombrePlan, p.InicialMinimaPorcentaje))
-	case stepInicial:
-		precio := s.Version.PrecioPorTipo(s.TipoPrecio)
-		inicial, ok := parseInicial(text, precio)
-		if !ok {
-			// Si es numérico pero inválido, mejor re-preguntar aquí mismo;
-			// si no es numérico, puede ser otra petición (catálogo, etc.).
-			if _, aerr := parseAmount(text); aerr != nil {
-				return errNeedsAssistant
+		f.initPlanVars(s)
+		f.showVarList(phone, s)
+	case stepVariables:
+		low := strings.ToLower(strings.TrimSpace(text))
+		if low == "siguiente" || low == "next" || low == "ok" {
+			s.Inicial = s.PlanVars["inicial"]
+			if s.Plan != nil && s.Inicial < s.effectivePrice()*s.Plan.InicialMinimaPorcentaje/100 {
+				minUSD := s.effectivePrice() * s.Plan.InicialMinimaPorcentaje / 100
+				f.bot.sendText(jidFor(phone), fmt.Sprintf(
+					"El inicial mínimo es %.0f%% del precio (%s USD).\nEscribe el nuevo inicial:",
+					s.Plan.InicialMinimaPorcentaje, formatQ(minUSD)))
+				s.Step = "var_edit_inicial"
+				return nil
 			}
-			f.bot.sendText(jidFor(phone),
-				"Escribe el inicial como monto en USD (ej: 25000) o porcentaje (ej: 50%).")
+			res, err := cotizaciones.CalcularPlan(ctx, f.supa, s.Plan.ID, s.PlanVars)
+			if err != nil {
+				f.bot.sendText(jidFor(phone), "No pude calcular el plan. Intenta de nuevo.")
+				return nil
+			}
+			s.Resultado = res
+			f.askCliente(phone, s)
 			return nil
 		}
-		s.Inicial = inicial
-		if s.Plan != nil && inicial < precio*s.Plan.InicialMinimaPorcentaje/100 {
-			f.bot.sendText(jidFor(phone), fmt.Sprintf(
-				"El inicial mínimo es %.2f%% del precio (%.2f USD). Escribe un monto mayor.",
-				s.Plan.InicialMinimaPorcentaje, precio*s.Plan.InicialMinimaPorcentaje/100))
-			return nil
+		// Editar una variable por número
+		idx, ok := parseIndex(text)
+		if !ok || idx < 1 || idx > len(s.VarEdits) {
+			return errNeedsAssistant
 		}
-		res, err := cotizaciones.CalcularPlan(ctx, f.supa, s.Plan.ID, precio, inicial)
-		if err != nil {
-			f.bot.sendText(jidFor(phone), "No pude calcular el plan. Intenta de nuevo.")
-			return nil
-		}
-		s.Resultado = res
-		f.askCliente(phone, s)
+		v := &s.VarEdits[idx-1]
+		s.Step = "var_edit_" + v.Token
+		f.bot.sendText(jidFor(phone), "Nuevo valor para "+v.Nombre+":")
+		return nil
 	case stepCliente:
 		if len(s.Candidates) == 0 {
 			term := strings.TrimSpace(text)
@@ -442,7 +492,6 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 				f.bot.sendText(jidFor(phone), "Escribe la cédula o el nombre del cliente.")
 				return nil
 			}
-			// ¿El texto parece "TipoDoc,Cedula,Nombre,..."? -> registrar cliente.
 			if p, ok := parseClienteLine(term); ok {
 				id, err := cotizaciones.CrearCliente(ctx, f.supa, emp.SocioComercial, *p)
 				if err != nil {
@@ -467,11 +516,8 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 			}
 			switch len(cands) {
 			case 0:
-				// El cliente no existe: si el texto trae nombre + teléfono/cédula,
-				// lo registramos y seguimos el flujo (no quedarse esperando).
 				if p, ok := parseNuevoCliente(term); ok {
 					if p.NumeroDocumento == "" && p.TelefonoPrincipal != "" {
-						// Falta la cédula: pedirla antes de registrar.
 						s.ClienteNuevo = p
 						s.Step = stepClienteCedula
 						f.bot.sendText(jidFor(phone),
@@ -479,7 +525,6 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 						return nil
 					}
 					if p.NombreRazonSocial == "" {
-						// Solo vino la cédula: pedir el nombre antes de registrar.
 						s.ClienteNuevo = p
 						s.Step = stepClienteNombre
 						f.bot.sendText(jidFor(phone),
@@ -502,9 +547,6 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 					f.askConfirmar(phone, s)
 					return nil
 				}
-				// No se pudo interpretar como cliente: si el mensaje es una
-				// petición de negocio (imprimir/ficha/catálogo/listar), que la
-				// atienda el router sin perder el flujo.
 				if classifyIntent(term) != intentConversacion {
 					return errNeedsAssistant
 				}
@@ -537,8 +579,6 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		if s.ClienteNuevo == nil {
 			return errNeedsAssistant
 		}
-		// El texto debe ser la cédula con su letra de tipo (V16573081, V-16573081
-		// o V 16573081). Sin la letra no se puede saber el tipo de documento.
 		tipoDoc, doc := parseDoc(text)
 		if doc == "" {
 			f.bot.sendText(jidFor(phone),
@@ -609,8 +649,102 @@ func (f *flowManager) process(ctx context.Context, phone string, emp *empleados.
 		default:
 			return errNeedsAssistant
 		}
+	default:
+		// Manejar paso de edición de variable (var_edit_*)
+		if strings.HasPrefix(s.Step, "var_edit_") {
+			tokenID := strings.TrimPrefix(s.Step, "var_edit_")
+			valor, ok := parseVarValue(text)
+			if !ok {
+				f.bot.sendText(jidFor(phone),
+					"Escribe un número válido (ej: 2000, 16, 0.0226).")
+				return nil
+			}
+			// Actualizar en PlanVars y VarEdits
+			if s.PlanVars == nil {
+				s.PlanVars = make(map[string]float64)
+			}
+			s.PlanVars[tokenID] = valor
+			// Sincronizar CustomPrice / effectivePrice() cuando cambia precio_base
+			if tokenID == "precio_base" {
+				s.CustomPrice = valor
+			}
+			for i := range s.VarEdits {
+				if s.VarEdits[i].Token == tokenID {
+					s.VarEdits[i].Valor = valor
+					break
+				}
+			}
+			// Si se editó porcentaje_inicial, recalcular inicial
+			if tokenID == "porcentaje_inicial" && s.PlanVars["precio_base"] > 0 {
+				nuevoInicial := math.Round(s.PlanVars["precio_base"]*valor/100*100) / 100
+				s.PlanVars["inicial"] = nuevoInicial
+				for i := range s.VarEdits {
+					if s.VarEdits[i].Token == "inicial" {
+						s.VarEdits[i].Valor = nuevoInicial
+						break
+					}
+				}
+			}
+			// Si se editó inicial directamente, también actualizar porcentaje_inicial
+			if tokenID == "inicial" && s.PlanVars["precio_base"] > 0 {
+				nuevoPct := valor / s.PlanVars["precio_base"] * 100
+				s.PlanVars["porcentaje_inicial"] = math.Round(nuevoPct*100) / 100
+				for i := range s.VarEdits {
+					if s.VarEdits[i].Token == "porcentaje_inicial" {
+						s.VarEdits[i].Valor = s.PlanVars["porcentaje_inicial"]
+						break
+					}
+				}
+			}
+			s.Step = stepVariables
+			f.showVarList(phone, s)
+			return nil
+		}
 	}
 	return nil
+}
+
+// initPlanVars inicializa PlanVars con los valores por defecto de los tokens
+// editables del plan, auto-llenando precio_base del vehículo seleccionado.
+func (f *flowManager) initPlanVars(s *quoteDraft) {
+	s.PlanVars = make(map[string]float64)
+	s.VarEdits = nil
+	tokens := cotizaciones.EditableTokens(s.Plan)
+	precio := s.effectivePrice()
+	for _, t := range tokens {
+		valor := t.Valor
+		// Auto-llenar precio_base con el precio del vehículo
+		if t.Token == "precio_base" {
+			valor = precio
+		}
+		// Auto-calcular inicial de porcentaje_inicial si no existe como token editable
+		if t.Token == "inicial" && valor == 0 {
+			pct := 50.0
+			if p, ok := s.PlanVars["porcentaje_inicial"]; ok && p > 0 {
+				pct = p
+			}
+			valor = math.Round(precio*pct/100*100) / 100
+		}
+		s.PlanVars[t.Token] = valor
+		s.VarEdits = append(s.VarEdits, varEdit{
+			Token:   t.Token,
+			Nombre:  t.Nombre,
+			Valor:   valor,
+			Formato: t.Formato,
+		})
+	}
+}
+
+// showVarList envía la lista de variables editables al usuario.
+func (f *flowManager) showVarList(phone string, s *quoteDraft) {
+	s.Step = stepVariables
+	var b strings.Builder
+	b.WriteString("Variables del plan " + s.Plan.NombrePlan + ":\n")
+	for i, v := range s.VarEdits {
+		fmt.Fprintf(&b, "%d) %s: %s\n", i+1, v.Nombre, formatVarValue(v.Valor, v.Formato))
+	}
+	b.WriteString("\nEscribe el número a editar, o *\"siguiente\"* para calcular.")
+	f.bot.sendText(jidFor(phone), strings.TrimRight(b.String(), "\n"))
 }
 
 func (f *flowManager) askVehiculo(phone string, s *quoteDraft) {
@@ -653,9 +787,10 @@ func (f *flowManager) askConfirmar(phone string, s *quoteDraft) {
 	var b strings.Builder
 	b.WriteString("Confirma los datos:\n")
 	fmt.Fprintf(&b, "Vehículo: %s %s\n", s.Version.MarcaNombre, displayName(*s.Version))
-	fmt.Fprintf(&b, "Precio (%s): %s USD\n", s.TipoPrecio, formatQ(s.Version.PrecioPorTipo(s.TipoPrecio)))
+	fmt.Fprintf(&b, "Precio (%s): %s USD\n", s.TipoPrecio, formatQ(s.effectivePrice()))
 	if s.Plan != nil {
-		fmt.Fprintf(&b, "Plan: %s\nInicial: %s USD\n", s.Plan.NombrePlan, formatQ(s.Inicial))
+		fmt.Fprintf(&b, "Plan: %s\n", s.Plan.NombrePlan)
+		fmt.Fprintf(&b, "Inicial: %s USD\n", formatQ(s.Inicial))
 	}
 	fmt.Fprintf(&b, "Cliente: %s (C.I. %s)\n", s.Cliente.NombreRazonSocial, s.Cliente.NumeroDocumento)
 	b.WriteString("¿Confirmar? (si/no)")
@@ -670,6 +805,7 @@ func (f *flowManager) emit(ctx context.Context, phone string, emp *empleados.Emp
 		ClienteID:         s.Cliente.ID,
 		Version:           *s.Version,
 		TipoPrecio:        s.TipoPrecio,
+		CustomPrecio:      s.CustomPrice,
 		FormaPago:         s.FormaPago,
 		Inicial:           s.Inicial,
 		NumeroPresupuesto: numero,
@@ -689,7 +825,6 @@ func (f *flowManager) emit(ctx context.Context, phone string, emp *empleados.Emp
 	to := jidFor(phone)
 	f.bot.sendText(to, "Cotización "+numero+" generada ✓")
 
-	// PDF (con fallback a fpdf) + vista previa en imagen.
 	var pdfBytes []byte
 	pdfBytes, err = pdf.RenderPDF(det)
 	if err != nil {
@@ -712,7 +847,7 @@ func (f *flowManager) emit(ctx context.Context, phone string, emp *empleados.Emp
 	f.clearDraft(ctx, phone)
 }
 
-// nextNumero genera COT-YYMMDD-XXX a partir del maximo del dia (inmune a borrados).
+// nextNumero genera COT-YYMMDD-XXX a partir del maximo del dia.
 func (f *flowManager) nextNumero(ctx context.Context, socioID int64) string {
 	today := time.Now().Format("060102")
 	prefix := "COT-" + today + "-"
@@ -730,13 +865,10 @@ func (f *flowManager) nextNumero(ctx context.Context, socioID int64) string {
 	return fmt.Sprintf("%s%03d", prefix, maxN+1)
 }
 
-// list envía las cotizaciones del mes en curso. Los vendedores solo ven las
-// suyas; los administradores ven las de todos los empleados de su socio.
+// list envía las cotizaciones del mes en curso.
 func (f *flowManager) list(phone string, emp *empleados.Empleado) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	// La lista de cotizaciones pasa a ser el contexto activo: limpiar picks de
-	// ficha para que un número suelto imprima la cotización y no una ficha vieja.
 	f.bot.clearStateKey(ctx, phone, "ficha_pick")
 	list, err := f.listadoCotizaciones(ctx, phone, emp)
 	if err != nil {
@@ -759,8 +891,6 @@ func (f *flowManager) list(phone string, emp *empleados.Empleado) {
 	f.bot.sendText(jidFor(phone), texto)
 }
 
-// listadoCotizaciones consulta las cotizaciones del mes según el rol del
-// empleado y guarda el resultado en lastList para imprimir después.
 func (f *flowManager) listadoCotizaciones(ctx context.Context, phone string, emp *empleados.Empleado) ([]cotizaciones.CotizacionBreve, error) {
 	cargo, err := empleados.CargoActual(ctx, f.supa, emp.ID)
 	if err != nil {
@@ -785,8 +915,6 @@ func (f *flowManager) listadoCotizaciones(ctx context.Context, phone string, emp
 	return list, nil
 }
 
-// pickCotizacion devuelve la cotización por su índice (1-based) del último
-// listado enviado al teléfono y su ID.
 func (f *flowManager) pickCotizacion(phone string, indice int) (cotizaciones.CotizacionBreve, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -797,8 +925,6 @@ func (f *flowManager) pickCotizacion(phone string, indice int) (cotizaciones.Cot
 	return list[indice-1], true
 }
 
-// restoreLastList recupera el último listado persistido en Supabase
-// (bot_chat_state["last_list"]) para poder imprimir tras un reinicio.
 func (f *flowManager) restoreLastList(ctx context.Context, phone string) {
 	st, err := f.bot.state.Get(ctx, phone)
 	if err != nil {
@@ -817,10 +943,6 @@ func (f *flowManager) restoreLastList(ctx context.Context, phone string) {
 	f.mu.Unlock()
 }
 
-// resolverCotizacion localiza la cotización del listado por índice (1-based).
-// Primero usa la lista en memoria; si no (p. ej. tras reinicio), recupera el
-// último listado persistido en Supabase (bot_chat_history) y reconsulta para
-// obtener el ID.
 func (f *flowManager) resolverCotizacion(ctx context.Context, phone string, emp *empleados.Empleado, indice int) (cotizaciones.CotizacionBreve, bool) {
 	if c, ok := f.pickCotizacion(phone, indice); ok {
 		return c, true
@@ -845,8 +967,6 @@ func (f *flowManager) resolverCotizacion(ctx context.Context, phone string, emp 
 	return cotizaciones.CotizacionBreve{}, false
 }
 
-// numeroDeHistorial extrae el numero_presupuesto del índice N del último
-// listado "Cotizaciones del mes en curso" guardado en el historial.
 func (f *flowManager) numeroDeHistorial(ctx context.Context, phone string, indice int) string {
 	hist, err := f.bot.history.Recent(ctx, phone, 60)
 	if err != nil {
@@ -871,8 +991,6 @@ func (f *flowManager) numeroDeHistorial(ctx context.Context, phone string, indic
 	return ""
 }
 
-// shortDate convierte un timestamp ISO a "dd/mm/aaaa"; si no se puede parsear
-// devuelve los 10 primeros caracteres (aaaa-mm-dd).
 func shortDate(iso string) string {
 	if iso == "" {
 		return ""
@@ -887,8 +1005,6 @@ func shortDate(iso string) string {
 	return t.Format("02/01/2006")
 }
 
-// esPeticionCatalogo detecta pedidos de la lista de vehículos o sus precios
-// (catálogo, precios, "qué vehículos hay", etc.) para atenderlos sin LLM.
 func esPeticionCatalogo(text string) bool {
 	low := norm(text)
 	switch low {
@@ -908,8 +1024,6 @@ func esPeticionCatalogo(text string) bool {
 
 var reIndexNum = regexp.MustCompile(`\d+`)
 
-// firstPositiveNumber extrae el primer número del texto rechazando negativos
-// ("-1" no devuelve 1). Devuelve (n, true) con n >= 1.
 func firstPositiveNumber(text string) (int, bool) {
 	loc := reIndexNum.FindStringIndex(text)
 	if loc == nil {
@@ -925,8 +1039,6 @@ func firstPositiveNumber(text string) (int, bool) {
 	return n, true
 }
 
-// parseIndex extrae el primer número del texto. Acepta "20", "La 20",
-// "el vehículo 3", "opción 2", etc. Rechaza textos sin números y negativos.
 func parseIndex(text string) (int, bool) {
 	return firstPositiveNumber(strings.TrimSpace(text))
 }
@@ -942,34 +1054,44 @@ func parseAmount(text string) (float64, error) {
 	return float64(ent), nil
 }
 
-// parseInicial interpreta la respuesta del paso "inicial": porcentaje
-// ("50", "50%", "50 por ciento", "el 50") o moneda USD ("25000", "$25000",
-// "25000 USD"). Regla: un número sin marcador <= 100 se interpreta como
-// porcentaje del precio; > 100 como monto en USD.
-func parseInicial(text string, precio float64) (float64, bool) {
-	t := strings.ToLower(strings.TrimSpace(text))
-	if t == "" {
+// parseVarValue parsea el valor ingresado por el usuario para una variable.
+// Acepta números con o sin separadores, $, %. Devuelve (valor, ok).
+func parseVarValue(text string) (float64, bool) {
+	clean := strings.TrimSpace(text)
+	if clean == "" {
 		return 0, false
 	}
-	esPct := strings.Contains(t, "%") ||
-		strings.Contains(t, "por ciento") || strings.Contains(t, "porciento") ||
-		strings.Contains(t, "porcentaje")
-	esMoneda := strings.Contains(t, "$") || strings.Contains(t, "usd") ||
-		strings.Contains(t, "dolares") || strings.Contains(t, "dólares")
-	n, ok := firstPositiveNumber(t)
-	if !ok {
+	clean = strings.ReplaceAll(clean, ",", ".")
+	clean = strings.ReplaceAll(clean, "$", "")
+	clean = strings.ReplaceAll(clean, "%", "")
+	clean = strings.ReplaceAll(clean, " ", "")
+	clean = strings.ReplaceAll(clean, "USD", "")
+	clean = strings.ReplaceAll(clean, "usd", "")
+	clean = strings.ReplaceAll(clean, "meses", "")
+	clean = strings.TrimSpace(clean)
+	var v float64
+	_, err := fmt.Sscanf(clean, "%f", &v)
+	if err != nil || v < 0 {
 		return 0, false
 	}
-	switch {
-	case esPct:
-		return precio * float64(n) / 100, true
-	case esMoneda:
-		return float64(n), true
+	return v, true
+}
+
+// formatVarValue formatea el valor de una variable para mostrar al usuario.
+func formatVarValue(valor float64, formato string) string {
+	switch formato {
+	case "Moneda":
+		return formatQ(valor) + " USD"
+	case "Porcentaje":
+		return fmt.Sprintf("%.2f%%", valor)
+	case "Entero":
+		return strconv.Itoa(int(math.Round(valor)))
 	default:
-		if n <= 100 {
-			return precio * float64(n) / 100, true
-		}
-		return float64(n), true
+		// Crudo: mostrar con hasta 4 decimales, sin trailing zeros
+		s := fmt.Sprintf("%.4f", valor)
+		s = strings.TrimRight(s, "0")
+		s = strings.TrimRight(s, ".")
+		return s
 	}
 }
 
@@ -980,7 +1102,6 @@ func parseClienteLine(text string) (*cotizaciones.CrearClienteParams, bool) {
 	}
 	tipoDoc := strings.TrimSpace(parts[0])
 	cedula := strings.TrimSpace(parts[1])
-	// El nombre puede contener comas; unimos el resto salvo el último (teléfono).
 	nombre := strings.TrimSpace(strings.Join(parts[2:], ","))
 	telefono := ""
 	if i := strings.LastIndex(nombre, ","); i >= 0 {
@@ -991,8 +1112,8 @@ func parseClienteLine(text string) (*cotizaciones.CrearClienteParams, bool) {
 		return nil, false
 	}
 	return &cotizaciones.CrearClienteParams{
-		TipoDocumento:    tipoDoc,
-		NumeroDocumento:  cedula,
+		TipoDocumento:     tipoDoc,
+		NumeroDocumento:   cedula,
 		NombreRazonSocial: nombre,
 		TelefonoPrincipal: telefono,
 	}, true
@@ -1003,9 +1124,6 @@ var (
 	reClienteDoc      = regexp.MustCompile(`(?i)\b[VEJPGvejpg]\s*-?\s*\d{4,10}`)
 )
 
-// parseDoc extrae tipo de documento (V/E/J/P/G) y número de un texto que solo
-// contiene la cédula. Acepta "V16573081", "V-16573081", "V 16573081" (con o sin
-// separador) pero NO un número pelado: sin la letra no se puede saber el tipo.
 func parseDoc(text string) (tipoDoc, doc string) {
 	term := strings.TrimSpace(text)
 	if term == "" {
@@ -1016,13 +1134,9 @@ func parseDoc(text string) (tipoDoc, doc string) {
 		doc = strings.TrimLeft(strings.TrimSpace(m[1:]), "- ")
 		return tipoDoc, doc
 	}
-	// Número pelado sin letra: no aceptar, el flujo debe preguntar el tipo.
 	return "", ""
 }
 
-// parseNuevoCliente extrae nombre + teléfono/cédula de un texto libre escrito
-// por el asesor (p. ej. "Juan Perez 04141234567" o "V-12345678 Maria Lopes").
-// Devuelve los datos para registrar al cliente y true si hay datos suficientes.
 func parseNuevoCliente(text string) (*cotizaciones.CrearClienteParams, bool) {
 	term := strings.TrimSpace(text)
 	if term == "" {
@@ -1037,9 +1151,6 @@ func parseNuevoCliente(text string) (*cotizaciones.CrearClienteParams, bool) {
 		tipoDoc = strings.ToUpper(m[:1])
 		doc = strings.TrimLeft(strings.TrimSpace(m[1:]), "- ")
 	}
-	// Quitar el token de cédula y el teléfono antes de extraer el nombre
-	// (evita que la letra del tipo de documento "V..." o el número queden
-	// registrados como nombre, sin borrar dígitos internos del nombre).
 	cleanTerm := term
 	if m := reClienteDoc.FindString(term); m != "" {
 		cleanTerm = strings.Replace(term, m, " ", 1)
@@ -1051,8 +1162,6 @@ func parseNuevoCliente(text string) (*cotizaciones.CrearClienteParams, bool) {
 	if doc == "" && phone == "" {
 		return nil, false
 	}
-	// Si no hay cédula, no usar el teléfono como documento: el flujo pedirá
-	// la cédula antes de registrar (ver stepCliente).
 	if doc == "" {
 		return &cotizaciones.CrearClienteParams{
 			NombreRazonSocial: nombre,
@@ -1060,8 +1169,8 @@ func parseNuevoCliente(text string) (*cotizaciones.CrearClienteParams, bool) {
 		}, true
 	}
 	return &cotizaciones.CrearClienteParams{
-		TipoDocumento:    tipoDoc,
-		NumeroDocumento:  doc,
+		TipoDocumento:     tipoDoc,
+		NumeroDocumento:   doc,
 		NombreRazonSocial: nombre,
 		TelefonoPrincipal: phone,
 	}, true
@@ -1075,7 +1184,6 @@ func listClientes(cands []cotizaciones.Cliente) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// formatQ formatea un número con separadores de Venezuela (1.234,56).
 func formatQ(v float64) string {
 	s := fmt.Sprintf("%.2f", v)
 	intPart, dec := splitDecimal(s)
@@ -1099,7 +1207,6 @@ func splitDecimal(s string) (string, string) {
 	return s, ""
 }
 
-// jidFor construye un JID de chat desde un número (sin '+'.
 func jidFor(phone string) types.JID {
 	return types.NewJID(phone, types.DefaultUserServer)
 }
