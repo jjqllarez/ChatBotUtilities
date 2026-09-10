@@ -171,7 +171,7 @@ func (b *Bot) cobranzasProcesarPendientes() {
 			estado = "error"
 			detalle = sendErr.Error()
 		}
-		b.marcarCobranza(ctx, id, estado, detalle, intentos)
+		b.marcarEnvio(ctx, cobranzasTable, id, estado, detalle, intentos)
 		cancel()
 	}
 }
@@ -193,8 +193,9 @@ func (b *Bot) sendCobranzas(ctx context.Context, to types.JID, text string) erro
 	return nil
 }
 
-// marcarCobranza actualiza el estado de envío de una fila de la cola.
-func (b *Bot) marcarCobranza(ctx context.Context, id int64, estado, detalle string, intentos int64) {
+// marcarEnvio actualiza el estado de envío de una fila de una cola de
+// mensajes (cobranzas o programados).
+func (b *Bot) marcarEnvio(ctx context.Context, table string, id int64, estado, detalle string, intentos int64) {
 	row := map[string]any{"estado_envio": estado}
 	if estado == "enviado" {
 		row["fecha_envio"] = time.Now().UTC().Format(time.RFC3339)
@@ -204,7 +205,7 @@ func (b *Bot) marcarCobranza(ctx context.Context, id int64, estado, detalle stri
 		row["intentos"] = intentos + 1
 	}
 	filter := "?id=eq." + url.QueryEscape(strconv.FormatInt(id, 10))
-	if err := b.supa.Update(ctx, cobranzasTable, filter, row); err != nil {
+	if err := b.supa.Update(ctx, table, filter, row); err != nil {
 		b.log.Printf("Cobranzas: marcando id %d como %s: %v", id, estado, err)
 	}
 }

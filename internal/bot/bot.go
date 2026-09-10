@@ -43,11 +43,11 @@ type Bot struct {
 	mu     sync.Mutex
 	client *whatsmeow.Client // re-created en re-vinculación
 
-	guard   *Guard
+	guard        *Guard
 	flows        *flowManager
 	flowRegistry *FlowRegistry
-	history *HistoryStore
-	state   *StateStore
+	history      *HistoryStore
+	state        *StateStore
 
 	adminCacheMu sync.Mutex
 	adminCache   map[string]adminEntry
@@ -65,10 +65,10 @@ type Bot struct {
 
 // outMsg es un mensaje de salida en cola (texto o adjunto).
 type outMsg struct {
-	jid     types.JID
-	text    string
-	media   *mediaPayload
-	mime    string
+	jid      types.JID
+	text     string
+	media    *mediaPayload
+	mime     string
 	filename string
 }
 
@@ -125,6 +125,7 @@ func New(container DeviceContainer, supa *supabase.Client, qrPort string, llmCli
 	go b.startQRServer()
 	go b.dailyCleanup()
 	b.startCobranzas()
+	b.startMensajesProgramados()
 	return b, nil
 }
 
@@ -550,6 +551,7 @@ func firstWord(s string) string {
 	}
 	return s
 }
+
 // RegisterFlow registra un flujo en el FlowRegistry del bot.
 // Se llama desde main.go al arrancar, antes de b.Run().
 // Ver AGENTS.md seccion 9 para el protocolo completo de registro.
