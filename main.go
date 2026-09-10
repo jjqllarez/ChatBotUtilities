@@ -80,6 +80,7 @@ func main() {
 	b.RegisterFlow(bot.NewCotizacionFlow(b))
 	b.RegisterFlow(bot.NewCatalogoFlow(b))
 	b.RegisterFlow(bot.NewRegistrarClienteFlow(b))
+	b.RegisterFlow(bot.NewCobranzaFlow(b))
 
 	if err := b.Run(stop); err != nil {
 		fmt.Fprintln(os.Stderr, "Bot terminó con error:", err)

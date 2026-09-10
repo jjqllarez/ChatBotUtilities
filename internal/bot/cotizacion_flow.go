@@ -53,22 +53,22 @@ type varEdit struct {
 
 // quoteDraft guarda el avance del flujo /cotizar de un chat.
 type quoteDraft struct {
-	Step       string                      `json:"step"`
-	FormaPago  string                      `json:"forma_pago"`
-	Versions   []cotizaciones.Version      `json:"versions"`
-	Version    *cotizaciones.Version       `json:"version"`
-	TipoPrecio string                      `json:"tipo_precio"`
-	CustomPrice float64                    `json:"custom_price,omitempty"`
-	Plans      []cotizaciones.Plan         `json:"plans"`
-	Plan       *cotizaciones.Plan          `json:"plan"`
-	PlanVars   map[string]float64          `json:"plan_vars,omitempty"`
-	VarEdits   []varEdit                   `json:"var_edits,omitempty"`
-	Inicial    float64                     `json:"inicial"`
-	Resultado  *cotizaciones.ResultadoMotor `json:"resultado"`
-	Cliente    *cotizaciones.Cliente       `json:"cliente"`
-	Candidates []cotizaciones.Cliente      `json:"candidates"`
+	Step         string                           `json:"step"`
+	FormaPago    string                           `json:"forma_pago"`
+	Versions     []cotizaciones.Version           `json:"versions"`
+	Version      *cotizaciones.Version            `json:"version"`
+	TipoPrecio   string                           `json:"tipo_precio"`
+	CustomPrice  float64                          `json:"custom_price,omitempty"`
+	Plans        []cotizaciones.Plan              `json:"plans"`
+	Plan         *cotizaciones.Plan               `json:"plan"`
+	PlanVars     map[string]float64               `json:"plan_vars,omitempty"`
+	VarEdits     []varEdit                        `json:"var_edits,omitempty"`
+	Inicial      float64                          `json:"inicial"`
+	Resultado    *cotizaciones.ResultadoMotor     `json:"resultado"`
+	Cliente      *cotizaciones.Cliente            `json:"cliente"`
+	Candidates   []cotizaciones.Cliente           `json:"candidates"`
 	ClienteNuevo *cotizaciones.CrearClienteParams `json:"cliente_nuevo,omitempty"`
-	SavedAt    time.Time                  `json:"saved_at,omitempty"`
+	SavedAt      time.Time                        `json:"saved_at,omitempty"`
 }
 
 // effectivePrice devuelve el precio a usar: el manual del admin si se definió,
@@ -221,7 +221,21 @@ func (f *flowManager) handleCommand(phone string, emp *empleados.Empleado, text 
 	case strings.HasPrefix(cmd, "/listar"):
 		go f.list(phone, emp)
 		return true
+	case strings.HasPrefix(cmd, "/cobranza"):
+		if fl := f.bot.flowRegistry.FindByName("cobranza"); fl != nil {
+			fl.Iniciar(phone, emp)
+		} else {
+			f.bot.sendText(jidFor(phone), "El módulo de cobranzas no está disponible.")
+		}
+		return true
 	case strings.HasPrefix(cmd, "/cancelar"):
+		// Cancelar flujo del registry activo (p. ej. cobranza); si no, el
+		// flujo de cotización legacy.
+		if af := f.bot.flowRegistry.ActiveFlow(context.Background(), phone); af != nil && af.Nombre() != "cotizacion" {
+			af.Cancelar(phone)
+			f.bot.sendText(jidFor(phone), "Consulta cancelada.")
+			return true
+		}
 		f.cancel(phone)
 		return true
 	case strings.HasPrefix(cmd, "/ayuda"):
@@ -244,7 +258,8 @@ const mensajeComoCotizar = "Para hacer una cotización:\n" +
 const mensajeAyuda = "Comandos disponibles:\n" +
 	"• /cotizar - iniciar una cotización\n" +
 	"• /listar - ver tus últimas cotizaciones\n" +
-	"• /cancelar - cancelar la cotización en curso\n\n" +
+	"• /cobranza - consultar cobranzas (vencidas, por vencer, pagadas)\n" +
+	"• /cancelar - cancelar la operación en curso\n\n" +
 	"También puedes pedirme cosas en lenguaje natural, como: cotizar un vehículo para un cliente."
 
 func (f *flowManager) start(phone string, emp *empleados.Empleado) {

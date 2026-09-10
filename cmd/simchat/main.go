@@ -64,6 +64,7 @@ func main() {
 	b.RegisterFlow(bot.NewCotizacionFlow(b))
 	b.RegisterFlow(bot.NewCatalogoFlow(b))
 	b.RegisterFlow(bot.NewRegistrarClienteFlow(b))
+	b.RegisterFlow(bot.NewCobranzaFlow(b))
 
 	msgs := flag.Args()
 	if len(msgs) == 0 {
