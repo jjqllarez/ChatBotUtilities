@@ -232,6 +232,16 @@ func (c *Client) RPC(ctx context.Context, name string, args map[string]any, dest
 
 // EdgeFunction calls a Supabase Edge Function (POST /functions/v1/<name>).
 func (c *Client) EdgeFunction(ctx context.Context, name string, args any, dest any) error {
+	return c.edgeFunction(ctx, name, args, dest, nil)
+}
+
+// EdgeFunctionWithHeaders calls a Supabase Edge Function with extra headers
+// (e.g. x-cron-auth for authenticated cron endpoints).
+func (c *Client) EdgeFunctionWithHeaders(ctx context.Context, name string, args any, dest any, extra map[string]string) error {
+	return c.edgeFunction(ctx, name, args, dest, extra)
+}
+
+func (c *Client) edgeFunction(ctx context.Context, name string, args any, dest any, extra map[string]string) error {
 	b, err := json.Marshal(args)
 	if err != nil {
 		return err
@@ -240,6 +250,9 @@ func (c *Client) EdgeFunction(ctx context.Context, name string, args any, dest a
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, site+"/functions/v1/"+name, bytes.NewReader(b))
 	if err != nil {
 		return err
+	}
+	for k, v := range extra {
+		req.Header.Set(k, v)
 	}
 	return c.exec(req, dest)
 }

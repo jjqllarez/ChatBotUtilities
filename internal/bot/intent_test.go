@@ -365,3 +365,28 @@ func TestParseTipoPrecio(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// normalizeWaNumber — números locales VE a formato internacional
+// ---------------------------------------------------------------------------
+
+func TestNormalizeWaNumber(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"04248821071", "584248821071"},      // local VE (11 dígitos)
+		{"+584248821071", "584248821071"},    // internacional con +
+		{"584248821071", "584248821071"},     // internacional sin +
+		{"0424-882.1071", "584248821071"},    // con separadores
+		{"", ""},                             // vacío
+		{"abc", ""},                          // sin dígitos
+		{"1234567890", "1234567890"},         // 10 dígitos: sin cambio
+		{"5842488210719", "5842488210719"},   // 13 dígitos: sin cambio
+	}
+	for _, tc := range cases {
+		if got := normalizeWaNumber(tc.in); got != tc.want {
+			t.Errorf("normalizeWaNumber(%q) = %q, quería %q", tc.in, got, tc.want)
+		}
+	}
+}
+

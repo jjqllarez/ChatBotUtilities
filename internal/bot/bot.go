@@ -124,6 +124,7 @@ func New(container DeviceContainer, supa *supabase.Client, qrPort string, llmCli
 	go b.outWorker()
 	go b.startQRServer()
 	go b.dailyCleanup()
+	b.startCobranzas()
 	return b, nil
 }
 
