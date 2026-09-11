@@ -43,7 +43,7 @@ func (b *Bot) startMensajesProgramados() {
 		b.log.Printf("Mensajes programados deshabilitado (MENSAJES_PROGRAMADOS_ENABLED=false)")
 		return
 	}
-	b.log.Printf("Mensajes programados activo (poll cada %ds)", poll)
+	b.log.Printf("Mensajes programados activo (poll cada %ds, reintentos_envio=%d)", poll, maxEnvioReintentos)
 	go b.mensajesConsumidor(poll)
 }
 
@@ -101,13 +101,11 @@ func (b *Bot) mensajesProcesarPendientes() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		sendErr := b.sendCobranzas(ctx, jidFor(normalizeWaNumber(numero)), texto)
-		estado := "enviado"
-		detalle := ""
-		if sendErr != nil {
-			estado = "error"
-			detalle = sendErr.Error()
-		}
-		b.marcarEnvio(ctx, mensajesTable, id, estado, detalle, intentos)
 		cancel()
+		estado, detalle := b.estadoTrasEnvio("Mensajes programados", id, sendErr, intentos)
+		b.marcarEnvio(ctx, mensajesTable, id, estado, detalle, intentos)
+		if estado == "error" {
+			b.registrarErrorWhatsApp("programados", numero, texto, detalle)
+		}
 	}
 }

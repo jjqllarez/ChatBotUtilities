@@ -41,6 +41,26 @@ const (
 	cobranzasFunction = "notificar-cobranzas"
 )
 
+// maxEnvioReintentos es el máximo GLOBAL de reintentos de ENVÍO por WhatsApp
+// antes de marcar la fila como 'error' definitivo. Aplica a TODAS las colas
+// (cobranzas y mensajes programados). La primera falla NO cuenta como
+// reintento: con 2, se intenta enviar hasta 3 veces (1 inicial + 2 reintentos).
+// Configurable de forma global con MSG_MAX_REINTENTOS_ENVIO (default 2).
+// Los reintentos usan la columna `intentos` y ocurren en los siguientes ciclos
+// del poll, por lo que sobreviven reinicios del bot.
+var maxEnvioReintentos = func() int64 {
+	const def = int64(2)
+	s := strings.TrimSpace(os.Getenv("MSG_MAX_REINTENTOS_ENVIO"))
+	if s == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 || n > 10 {
+		return def
+	}
+	return n
+}()
+
 // cobranzasConfig agrupa la configuración del sistema de cobranzas.
 type cobranzasConfig struct {
 	enabled  bool
@@ -74,8 +94,8 @@ func (b *Bot) startCobranzas() {
 		b.log.Printf("Cobranzas deshabilitado (COBRANZAS_ENABLED=false)")
 		return
 	}
-	b.log.Printf("Cobranzas activo (reloj %02d:00 hora VE, poll cada %ds, cron_auth=%s)",
-		cfg.hour, cfg.pollSecs, maskToken(cfg.cronAuth))
+	b.log.Printf("Cobranzas activo (reloj %02d:00 hora VE, poll cada %ds, cron_auth=%s, reintentos_envio=%d)",
+		cfg.hour, cfg.pollSecs, maskToken(cfg.cronAuth), maxEnvioReintentos)
 	go b.cobranzasReloj(cfg)
 	go b.cobranzasConsumidor(cfg)
 }
@@ -165,14 +185,12 @@ func (b *Bot) cobranzasProcesarPendientes() {
 		// contexto global a mitad (el gap anti-baneo se acumula).
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		sendErr := b.sendCobranzas(ctx, jidFor(normalizeWaNumber(numero)), texto)
-		estado := "enviado"
-		detalle := ""
-		if sendErr != nil {
-			estado = "error"
-			detalle = sendErr.Error()
-		}
-		b.marcarEnvio(ctx, cobranzasTable, id, estado, detalle, intentos)
 		cancel()
+		estado, detalle := b.estadoTrasEnvio("Cobranzas", id, sendErr, intentos)
+		b.marcarEnvio(ctx, cobranzasTable, id, estado, detalle, intentos)
+		if estado == "error" {
+			b.registrarErrorWhatsApp("cobranzas", numero, texto, detalle)
+		}
 	}
 }
 
@@ -194,8 +212,12 @@ func (b *Bot) sendCobranzas(ctx context.Context, to types.JID, text string) erro
 }
 
 // marcarEnvio actualiza el estado de envío de una fila de una cola de
-// mensajes (cobranzas o programados).
-func (b *Bot) marcarEnvio(ctx context.Context, table string, id int64, estado, detalle string, intentos int64) {
+// mensajes (cobranzas o programados). NO hereda el contexto del envío: cuando
+// el mensaje ya salió por WhatsApp (gap anti-baneo + red), ese contexto puede
+// estar vencido y el PATCH a Supabase fallaba con "context deadline exceeded",
+// dejando la fila en 'pendiente' (y por tanto reenviándose -> duplicados).
+// Usa un contexto propio por intento, con reintentos y backoff.
+func (b *Bot) marcarEnvio(_ context.Context, table string, id int64, estado, detalle string, intentos int64) {
 	row := map[string]any{"estado_envio": estado}
 	if estado == "enviado" {
 		row["fecha_envio"] = time.Now().UTC().Format(time.RFC3339)
@@ -205,9 +227,42 @@ func (b *Bot) marcarEnvio(ctx context.Context, table string, id int64, estado, d
 		row["intentos"] = intentos + 1
 	}
 	filter := "?id=eq." + url.QueryEscape(strconv.FormatInt(id, 10))
-	if err := b.supa.Update(ctx, table, filter, row); err != nil {
-		b.log.Printf("Cobranzas: marcando id %d como %s: %v", id, estado, err)
+
+	const attempts = 3
+	var err error
+	for i := 1; i <= attempts; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err = b.supa.Update(ctx, table, filter, row)
+		cancel()
+		if err == nil {
+			return
+		}
+		b.log.Printf("Cobranzas: marcando id %d como %s (intento %d/%d): %v", id, estado, i, attempts, err)
+		if i < attempts {
+			time.Sleep(time.Duration(i) * 2 * time.Second)
+		}
 	}
+	b.log.Printf("Cobranzas: no se pudo marcar id %d como %s tras %d intentos: %v", id, estado, attempts, err)
+}
+
+// estadoTrasEnvio decide el estado a persistir tras un intento de envío:
+//   - éxito                          -> "enviado"
+//   - fallo con reintentos disponibles -> "pendiente" (se reintenta en el
+//     siguiente ciclo del poll; `intentos` se incrementa en marcarEnvio)
+//   - fallo sin reintentos           -> "error" (definitivo)
+func (b *Bot) estadoTrasEnvio(origen string, id int64, sendErr error, intentos int64) (estado, detalle string) {
+	if sendErr == nil {
+		return "enviado", ""
+	}
+	detalle = sendErr.Error()
+	if intentos < maxEnvioReintentos {
+		b.log.Printf("%s: envío id %d falló (intento %d/%d), se reintentará: %v",
+			origen, id, intentos+1, maxEnvioReintentos+1, sendErr)
+		return "pendiente", detalle
+	}
+	b.log.Printf("%s: envío id %d falló tras %d intentos; marcado como error: %v",
+		origen, id, intentos+1, sendErr)
+	return "error", detalle
 }
 
 // normalizeWaNumber normaliza un número de WhatsApp a dígitos con código de

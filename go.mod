@@ -8,6 +8,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	github.com/wneessen/go-mail v0.8.1
 	go.mau.fi/util v0.9.12-0.20260717235539-f9ffa7eca58d
 	go.mau.fi/whatsmeow v0.0.0-20260810134348-a23afe317180
 	google.golang.org/protobuf v1.36.11

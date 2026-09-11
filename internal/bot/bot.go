@@ -126,6 +126,7 @@ func New(container DeviceContainer, supa *supabase.Client, qrPort string, llmCli
 	go b.dailyCleanup()
 	b.startCobranzas()
 	b.startMensajesProgramados()
+	b.startCorreo()
 	return b, nil
 }
 

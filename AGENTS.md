@@ -57,6 +57,10 @@ go/
   internal/bot/guards.go            # anti-baneo (cola de salida, ritmo, cuota diaria)
   internal/bot/simmode.go           # modo simulación: bot_config.simulation + ForceSim + SimulateMessage
   cmd/simchat/main.go               # driver de pruebas SIN WhatsApp (inyecta mensajes en handleMessageV2)
+  internal/correo/crypto.go         # cifrado AES-256-GCM de credenciales de correo (llave en EMAIL_CRED_KEY)
+  internal/correo/smtp.go           # envío SMTP (go-mail): ssl/starttls, clasifica 4xx/5xx
+  internal/bot/correo_cola.go       # consumidor de cola_correos + digest de alertas + fallback WhatsApp
+  cmd/setmail/main.go               # comando admin: registra cuenta remitente con contraseña cifrada
 ```
 
 ## Modo simulación y driver de pruebas (`cmd/simchat`)
@@ -346,6 +350,10 @@ y corregidas en caliente:
 - `bot_flows`: metadatos dinámicos de los flujos conversacionales (multi-tenant por `socio_comercial`). Es la fuente de
   verdad que lee el `preClasificarLLM` para despachar mensajes ambiguos (ver Sección 9). No hay migración SQL versionada:
   las filas se insertan/editan directo en Supabase (ver 9.2/9.3).
+- Correo (ver Sección 10): `cuentas_correo` (remitentes multicuenta; `password_enc` cifrada),
+  `cola_correos` (cola de envío genérica), `adjuntos_correo` (creada, sin lógica aún),
+  `intentos_correo` (auditoría por intento) y `errores_whatsapp` (fallos de campañas para el digest
+  de alertas). RLS activado **sin políticas** (solo service-role).
 - Tablas del CRM (compartidas, no modificadas por el bot): `cotizaciones`, `clientes`, `versiones_vehiculos`,
   `historial_precios`, `planes_financiamiento`, `entes_financieros`, `socio_comercial`, `marcas`, `modelos`,
   `cargos`, `historial_cargos`, `permisos`, `cargo_permiso` (roles/permisos; `admin_total` = administrador).
@@ -360,6 +368,21 @@ supabase link --project-ref <ref>   # ya enlazado en go/
 supabase db query --linked "SELECT ..."   # SQL directo a la BD
 supabase db query --linked "SELECT pg_notify('pgrst','reload schema');"  # recargar PostgREST
 ```
+
+En el VPS el CLI ya está instalado en `/usr/local/bin/supabase` (v2.117.0; binario descargado de
+los releases de GitHub, no había npm). Ref del proyecto: `nspouusalchoszarqqsi`.
+
+**Alternativa sin `link` (Management API)** — útil para aplicar DDL desde un agente sin contraseña de BD:
+
+```bash
+# body.json = {"query": "<SQL>"}  (generado con python3 -c 'json.dumps...')
+curl -s -X POST "https://api.supabase.com/v1/projects/nspouusalchoszarqqsi/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  --data @body.json
+```
+
+Así se aplicó la migración de correo (`20260911000000_correo_cola.sql`) → HTTP 201. El token es
+personal y **no** se guarda en archivos (se usa al vuelo y se descarta).
 
 ## Credenciales / secretos
 
@@ -387,6 +410,11 @@ supabase db query --linked "SELECT pg_notify('pgrst','reload schema');"  # recar
 - `WA_MIN_GAP_MS` (default 1200), `WA_MAX_DAILY_MSGS` (default 1500) — anti-baneo
 - `HISTORY_CLEAN_HOUR` (default 3), `HISTORY_RETAIN_HOURS` (default 24) — limpieza de memoria
 - `CHROME_PATH` (Chromium para PDF/PNG/card), `QR_PORT` (default 8080)
+
+Correo (ver Sección 10):
+- `EMAIL_CRED_KEY` — llave AES-256 (32 bytes base64) para cifrar/descifrar `cuentas_correo.password_enc`.
+  **Vacía o comentada = sistema de correo deshabilitado** (el worker no arranca).
+- `EMAIL_POLL_SECS` (default 60), `ALERTAS_WHATSAPP_SECS` (default 300).
 
 ## Prueba manual del bot
 
@@ -467,3 +495,101 @@ La tabla `bot_flows` es la **fuente de verdad dinámica** de los flujos conversa
 3. **Cancelable**: El flujo DEBE responder a `/cancelar` limpiando todo su estado.
 4. **Independiente**: Un flujo no llama métodos de otros flujos directamente — usa el registro/mecanismo de composición (`FlowComposable`).
 5. **Tests primero**: Ejecutar `go test ./internal/bot/` antes de cada deploy.
+
+---
+
+## 10) Sistema de Correo (cola `cola_correos` + alertas)
+
+Cola de correo **genérica** (no exclusiva de cobranzas) que envía por SMTP usando
+**PurelyMail** (`smtp.purelymail.com`), con envío diferido, reintentos, auditoría y un
+**digest de alertas** por fallos de WhatsApp. El productor solo inserta filas; el bot solo
+envía (no arma contenido: el productor entrega `asunto` + `cuerpo_html`/`cuerpo_texto` finales).
+
+### 10.1 Piezas
+
+| Pieza | Ruta | Rol |
+|---|---|---|
+| Cifrado | `internal/correo/crypto.go` | AES-256-GCM. Cifra/descifra `password_enc` (llave en `EMAIL_CRED_KEY`) |
+| SMTP | `internal/correo/smtp.go` | Envía con `github.com/wneessen/go-mail` (ssl/starttls/ninguna); distingue 4xx (reintenta) de 5xx (permanente) |
+| Consumidor + digest | `internal/bot/correo_cola.go` | Claim, envío diferido, backoff, 3 intentos, digest de alertas, fallback WhatsApp |
+| Registrar cuenta | `cmd/setmail/main.go` | Comando admin: cifra la contraseña y hace upsert en `cuentas_correo` |
+| Migración | `supabase/migrations/20260911000000_correo_cola.sql` | Las 5 tablas + índices + RLS |
+
+Arranque en `internal/bot/bot.go` (`New` → `b.startCorreo()`). Si falta `EMAIL_CRED_KEY`,
+el sistema queda **deshabilitado** y lo loguea (`Correo deshabilitado (falta EMAIL_CRED_KEY)`).
+
+### 10.2 Tablas
+
+- `cuentas_correo` (remitentes **multicuenta**): `socio_comercial`, `nombre_remitente`, `email`,
+  `smtp_host/port/seguridad/usuario`, `password_enc` (cifrada), `key_id`, (campos IMAP opcionales),
+  `activo`. Unique `(socio_comercial, email)`.
+- `cola_correos`: `remitente_id` (FK), `para`, `asunto`, `cuerpo_html`, `cuerpo_texto`, `tipo`
+  (`cobranza`|`error_reenvio`|`manual`|...), `referencia` (traza/idempotencia), `prioridad`,
+  `estado_envio` (`pendiente`|`enviando`|`enviado`|`error`|`cancelado`), `intentos`,
+  `proximo_intento` (backoff), `fecha_programada`/`hora_programada`, `fecha_envio`, `error_envio`,
+  `locked_at`/`locked_by`.
+- `adjuntos_correo`: **creada sin lógica** (fase 2; archivo iría a Supabase Storage).
+- `intentos_correo`: auditoría por intento (`intento`, `resultado`, `codigo_smtp`, `detalle`).
+- `errores_whatsapp`: fallos de campañas (`origen` ∈ `cobranzas`|`programados`, `notificado`, `lote`).
+
+### 10.3 Reglas de envío (implementadas)
+
+- **Reintentos**: **3 intentos totales** (1 inicial + 2 reintentos), hardcodeado (`maxIntentosCorreo`).
+- **Backoff**: `backoffCorreos = [1min, 5min]` (espera creciente).
+- **Rebotes**: 4xx/red → reintenta; **5xx → `error` directo** (permanente).
+- **Claim**: marca `enviando` + `locked_at`/`locked_by` antes de mandar; al arrancar recupera filas
+  `enviando` con más de 15 min (crash a mitad).
+- **Envío diferido**: respeta `fecha_programada` + `hora_programada` (hora `America/Caracas`).
+- **Idempotencia**: índice único parcial `(socio_comercial, tipo, referencia, para)` mientras la fila
+  esté `pendiente`/`enviando`.
+- **Remitente no configurado / fallo de descifrado** → `error` con mensaje, **sin reintentar**.
+- **Gotcha `updated_at`**: el helper `supabaseUpdate` **no** inyecta columnas; cada `PATCH` a
+  `cola_correos` incluye `updated_at` explícitamente (esa tabla lo tiene). `errores_whatsapp`
+  **no** tiene `updated_at` (si se manda, PostgREST responde 400 `PGRST204`).
+
+### 10.4 Alertas por fallos de WhatsApp (solo campañas)
+
+- Los fallos **definitivos** de **cobranzas** y **mensajes programados** llaman a
+  `registrarErrorWhatsApp(origen, numero, texto, error)` → fila en `errores_whatsapp`.
+  Los fallos del **outbox** (respuestas a empleados) **no** generan alerta (decisión del negocio).
+- Un worker cada `ALERTAS_WHATSAPP_SECS` (default 300s) agrupa los `notificado=false` en **un solo**
+  correo (digest, `tipo='error_reenvio'`, `referencia='alertas-wa'`) desde `servidor@dongfengve.com`
+  hacia `johnathan.quijada@gmail.com` (fijos) y los marca `notificado=true`.
+- **Anti-bucle**: si el correo de alerta falla definitivamente → WhatsApp a `04248821071` (fijo).
+  Ese WhatsApp **no** genera otra alerta; si eso falla, no hay más (futuro: bot de Telegram).
+
+### 10.5 Registrar una cuenta remitente
+
+```bash
+go build -o /tmp/setmail ./cmd/setmail
+
+cd /opt/whatsbot   # para que godotenv lea el .env del servicio
+printf '%s\n' 'LA_CONTRASEÑA' | /tmp/setmail -email servidor@dongfengve.com -nombre "Capital Motors C.A." -socio 1
+# Flags: -host smtp.purelymail.com -port 465 -seguridad ssl|starttls|ninguna -usuario X
+```
+
+La contraseña se lee por **stdin** (no queda en el historial ni en la lista de procesos) y se
+guarda **cifrada**. Requiere `EMAIL_CRED_KEY` + `SUPABASE_*` en el `.env` del directorio actual.
+
+### 10.6 Estado actual (2026-09-11)
+
+- **Activo y verificado E2E**: PurelyMail ya está **pagado** (fin del trial). `EMAIL_CRED_KEY` está
+  **activa** en `/opt/whatsbot/.env` y el worker arranca (`Correo activo ... intentos=3 backoff=[1m0s 5m0s]`).
+  Pruebas realizadas:
+  - **Envío directo**: fila en `cola_correos` → `enviado` (SMTP 250) a `johnathan.quijada@gmail.com`
+    desde `servidor@dongfengve.com`.
+  - **Digest de alertas**: error sintético en `errores_whatsapp` → correo agrupado `tipo='error_reenvio'`
+    (`referencia='alertas-wa'`) enviado y la fila marcada `notificado=true`.
+- **Histórico**: antes estuvo deshabilitado porque el trial de PurelyMail se quedó sin cuota
+  (`550 5.3.2 ... trial account has run out of email sending`).
+- **Reactivar / deshabilitar**: quitar/poner el `#` en la línea `EMAIL_CRED_KEY=...` de
+  `/opt/whatsbot/.env` y `sudo systemctl restart whatsbot`. **No** requiere recompilar ni
+  re-registrar la contraseña (el `password_enc` existente sigue válido).
+- La cuenta `servidor@dongfengve.com` (id=1, socio 1, `smtp.purelymail.com:465` ssl) está registrada.
+
+### 10.7 Pendiente (no implementado)
+
+- **Purga de retención**: borrar `cola_correos` en `error` el mismo día (y opcionalmente
+  `errores_whatsapp` ya notificados). Acordado, aún sin código.
+- **Adjuntos**: tabla creada; sin generación ni envío.
+- **IMAP**: campos en `cuentas_correo` solo previstos; no se lee el buzón (solo envío SMTP).
